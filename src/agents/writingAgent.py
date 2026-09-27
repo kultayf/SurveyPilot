@@ -97,7 +97,9 @@ class WritingAgent(BaseAgent):
         context.spec = self.spec
         super().__init__(context)
         self.max_tool_calls = 2
-        self.max_revision_rounds = 1
+        # 中文说明：真实任务里一轮修改常常只能补齐一部分逐句引用。允许再改一次，
+        # 但仍受单节 token 和时间上限约束；到上限时保留失败状态，绝不自动放行。
+        self.max_revision_rounds = 2
 
     def _run(self, state: JsonObject) -> JsonObject:
         """BaseAgent 要求同步入口，但当前写作节点只使用异步入口。"""
@@ -680,7 +682,15 @@ def normalize_writing_section_citations(
         if not paper_id or not chunk_ids:
             invalid.append({"claim": claim, "paperId": paper_id, "reason": "证据缺少论文编号或切片编号"})
             continue
-        valid_chunks = [scoped_chunks[value] for value in chunk_ids if value in scoped_chunks and scoped_chunks[value].paperId.casefold() == paper_id.casefold()]
+        valid_chunks = []
+        for value in chunk_ids:
+            # 中文说明：模型偶尔照抄了切片编号的后半段，漏掉前面的论文编号。
+            # 只尝试补上当前 evidence 指定的同一篇论文编号，并要求补全后精确命中
+            # 当前会话已有的原文切片；找不到时仍判为无效，不能模糊匹配或猜证据。
+            full_id = value if value in scoped_chunks else f"{paper_id}:{value}"
+            chunk = scoped_chunks.get(full_id)
+            if chunk is not None and chunk.paperId.casefold() == paper_id.casefold():
+                valid_chunks.append(chunk)
         if len(valid_chunks) != len(chunk_ids):
             invalid.append({"claim": claim, "paperId": paper_id, "chunkIds": chunk_ids, "reason": "切片不存在、超出会话范围或不属于这篇论文"})
             continue
@@ -983,7 +993,10 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
             "已调用工具得到的资料": tool_results,
             "允许引用的真实论文编号": state.get("available_paper_ids") or [],
             "当前草稿": str(state.get("draft") or "")[:6000],
-            "审查整改建议": [_compact_text(item, max_chars=350) for item in (state.get("revision_suggestions") or [])[:5]],
+            # 中文说明：同一篇论文漏切片会在多句中反复出现，先去重再传给模型。
+            # 过去只取前五条，后面的错误类型根本没有进入修订输入。
+            "审查整改建议": [_compact_text(item, max_chars=350)
+                         for item in _deduplicate_strings(list(state.get("revision_suggestions") or []))[:20]],
             "工具次数要求": "最多调用 2 次工具；现已调用 %d 次，达到上限后只能返回 draft。" % int(state.get("tool_call_count") or 0),
             "可用工具": [
                 "get_extraction(List[paperId])：获取论文结构化摘要",

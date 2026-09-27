@@ -74,7 +74,9 @@ class ReadDefaults:
 class RetrievalDefaults:
     """控制全文检索的数量和可选重排模型；分块长度使用字符而非假定 token。"""
 
-    dense_enabled: bool = True
+    # 中文说明：固定 30 题对照中，关键词检索找到的正确原文片段更多、耗时更少。
+    # 因此没有显式配置时先用 BM25；需要混合检索的用户仍可主动开启。
+    dense_enabled: bool = False
     candidate_k: int = 50
     top_k: int = 8
     rrf_k: int = 60
@@ -174,7 +176,7 @@ class SystemConfig:
                 vector_store_collection=str(read.get("vector_store_collection") or "papers"),
             ),
             retrieval=RetrievalDefaults(
-                dense_enabled=_optional_bool(retrieval.get("dense_enabled")) is not False,
+                dense_enabled=_optional_bool(retrieval.get("dense_enabled")) is True,
                 candidate_k=candidate_k,
                 top_k=min(candidate_k, _read_positive_int(retrieval.get("top_k"), 8, maximum=50)),
                 rrf_k=_read_positive_int(retrieval.get("rrf_k"), 60),

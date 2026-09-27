@@ -66,8 +66,15 @@ class CitationAuditAgent(BaseAgent):
                         cited.add(paper_id)
                     else:
                         invalid = True
-            if any(str(binding.get("claim") or "") in unit for binding in section.get("invalid_citation_evidence") or []):
-                invalid = True
+            # 中文说明：模型有时只给论文编号、不给 claim。空字符串会被 Python 视为
+            # 出现在每一段里，进而把完全无关的段落也判成错误。没有 claim 时，只在
+            # 本段确实引用了该论文的情况下标错；其他段落仍照常独立核查。
+            for binding in section.get("invalid_citation_evidence") or []:
+                bad_claim = str(binding.get("claim") or "").strip()
+                bad_paper_id = canonical(binding.get("paperId") or "")
+                if (bad_claim and bad_claim in unit) or (bad_paper_id and bad_paper_id in cited):
+                    invalid = True
+                    break
             if invalid:
                 invalid_units.add(item["index"])
                 item.update(status="invalid_citation", reason="存在未知引用或原文归属错误")

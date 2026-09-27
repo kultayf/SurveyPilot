@@ -56,7 +56,6 @@ def run_writing_node():
         session_read_results = await asyncio.to_thread(_load_session_read_results, state)
         cache_dir = SystemConfig.load().read.paper_cache_dir
         available_paper_ids = _collect_available_paper_ids(
-            search_results=search_results,
             read_results=read_results,
             session_read_results=session_read_results,
         )
@@ -688,22 +687,22 @@ def _collect_paper_metadata(
 
 def _collect_available_paper_ids(
     *,
-    search_results: list[Any],
     read_results: list[JsonObject],
     session_read_results: list[JsonObject],
 ) -> list[str]:
-    """从当前可用的结构化论文资料中收集真实论文编号。"""
+    """只收集本会话已经建立全文切片的论文编号。"""
 
-    # 中文说明：这里只读取检索和阅读节点已经保存的 paperId，
-    # 不从模型写出的正文里猜编号，避免把 P1 之类的虚构内容再次传回模型。
+    # 中文说明：检索到题录不等于读到了全文。旧逻辑把下载失败的论文也列进
+    # “允许引用”的名单，模型写完后必然找不到原文切片。这里只从阅读记录取
+    # 已索引且确有切片的论文；失败题录仍留在检索记录，不冒充全文依据。
     paper_ids: list[str] = []
-    for payload in [*search_results, *read_results, *session_read_results]:
-        if isinstance(payload, PaperDocument):
-            paper = payload.to_dict()
-        elif isinstance(payload, dict):
-            paper = dict(payload.get("paper") or payload)
-        else:
+    for payload in [*read_results, *session_read_results]:
+        if not isinstance(payload, dict):
             continue
+        full_text = payload.get("full_text") or {}
+        if full_text.get("status") not in {"indexed", "chunks_saved"} or int(full_text.get("chunk_count") or 0) < 1:
+            continue
+        paper = dict(payload.get("paper") or {})
         paper_id = str(paper.get("paperId") or paper.get("id") or "").strip()
         if paper_id:
             paper_ids.append(paper_id)

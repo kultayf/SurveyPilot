@@ -96,6 +96,9 @@ model.json
 
 # other
 doc/*
+!doc/validation/
+doc/validation/*
+!doc/validation/FINAL_ACCEPTANCE_20260927.md
 paper-search-mcp/
 data/*
 .claude/*

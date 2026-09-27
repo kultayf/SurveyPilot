@@ -34,7 +34,8 @@ read:
   vector_store_collection: papers
 
 retrieval:
-  dense_enabled: true
+  # 固定 30 题比较中，BM25 的正确原文片段命中率更高且延迟更低；混合检索可按需开启。
+  dense_enabled: false
   candidate_k: 50
   top_k: 8
   rrf_k: 60
