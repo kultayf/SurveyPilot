@@ -1,0 +1,48 @@
+defaults:
+  llm:
+    temperature: null
+    max_tokens: null
+    reasoning_effort: null
+    context_window_tokens: null
+  embedding:
+    dimensions: 1024
+    batch_size: 32
+
+# 论文检索密钥默认留空；不配置时系统会继续使用匿名检索。
+paper_retrieval:
+  openalex_api_key: null
+  semantic_scholar_api_key: null
+
+# read 节点的相关系统配置
+read:
+  agent_name: default_agent
+  paper_cache_dir: data/paper_cache
+  connect_timeout_seconds: 10
+  download_timeout_seconds: 60
+  max_file_size_mb: 50
+  chunk_size: 1024
+  chunk_overlap: 150
+  # 长度单位为字符；子块用于检索，父块为写作提供更多上下文。
+  parent_chunk_size: 5000
+  parser_name: pymupdf4llm
+  # 选择 docling 时必须先安装可选依赖并准备本地模型目录。
+  docling_artifacts_path: null
+  enable_full_text_embedding: true
+  # continue: 向量不可用时继续关键词检索；pause: 保存现场等待恢复。
+  embedding_failure_policy: continue
+  vector_store_path: data/vector_store
+  vector_store_collection: papers
+
+retrieval:
+  dense_enabled: true
+  candidate_k: 50
+  top_k: 8
+  rrf_k: 60
+  # 重排需要 uv sync --extra reranker 和本地模型；默认不下载模型。
+  reranker_enabled: false
+  reranker_model: BAAI/bge-reranker-large
+  reranker_local_files_only: true
+
+# 实证字段覆盖不足时，最多补搜一次、两条查询、三篇新论文。关闭可避免额外联网与阅读费用。
+research:
+  supplemental_search_enabled: true

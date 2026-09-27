@@ -1,0 +1,307 @@
+/* 中文说明：全站共用同一套颜色和文字层级。把视觉调整集中在这里，
+   原有组件的布局与交互仍由 styles.css 管理，后续改主题也容易找到入口。 */
+:root {
+  --bg: #f4f7fb;
+  --bg-strong: #edf2f8;
+  --surface: #fff;
+  --surface-strong: #fff;
+  --surface-muted: #f8fafc;
+  --border: #e3e9f1;
+  --border-strong: #ccd7e6;
+  --text: #17263d;
+  --text-soft: #52647d;
+  --text-faint: #73839a;
+  --accent: #315cce;
+  --accent-soft: #eaf0ff;
+  --success: #168365;
+  --success-soft: #e6f6ef;
+  --warning: #a96c18;
+  --warning-soft: #fff2db;
+  --danger: #ba4c58;
+  --danger-soft: #fff0f1;
+  --shadow-md: 0 12px 34px rgba(31, 52, 85, 0.055);
+  --shadow-lg: 0 22px 65px rgba(31, 52, 85, 0.1);
+  --font-sans: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+body {
+  background: radial-gradient(circle at 72% -16%, #e7efff 0, transparent 34%), #f4f7fb;
+  color: var(--text);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: #d7e4ff; color: #173876; }
+
+/* 中文说明：侧栏始终清楚显示会话名称和状态，避免小字号让历史记录难以扫描。 */
+.app-shell,
+.app-shell[data-collapsed="true"] { grid-template-columns: clamp(260px, 19vw, 310px) minmax(0, 1fr); }
+.app-shell[data-collapsed="true"] { grid-template-columns: 78px minmax(0, 1fr); }
+.app-main { padding: 26px clamp(18px, 2.5vw, 38px) 34px; }
+.sidebar {
+  padding: 24px 16px 18px;
+  border-right: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 7px 0 36px rgba(34, 55, 88, 0.025);
+}
+.sidebar-head { min-height: 52px; padding: 0 5px 20px; }
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #315cce, #6084e5);
+  font-size: 0.83rem;
+  box-shadow: 0 7px 17px rgba(49, 92, 206, 0.22);
+}
+.brand-copy .eyebrow { color: #63738d; font-size: 0.66rem; letter-spacing: 0.08em; }
+.brand-copy strong { color: #1c2d47; font-size: 1rem; }
+.sidebar-head > .icon-button { width: 30px; height: 30px; color: #74839b; }
+.sidebar-nav { gap: 7px; padding-bottom: 20px; }
+.nav-item { min-height: 43px; padding: 10px 12px; border-radius: 10px; color: #50627c; font-size: 0.88rem; }
+.nav-item.active { background: #eaf0ff; color: #2754c2; box-shadow: none; }
+.nav-item:hover:not(.active) { background: #f3f6fb; }
+.sidebar-history { gap: 14px; padding-top: 21px; }
+.sidebar-history-head h2 { color: #2e405b; font-size: 0.87rem; }
+.sidebar-history-create { width: 32px; height: 32px; border-radius: 9px; }
+.sidebar-session-list { gap: 8px; }
+.sidebar-session-group-title { padding: 2px 7px; color: #7a899e; font-size: 0.73rem; font-weight: 700; }
+.sidebar-session-item {
+  gap: 10px;
+  padding: 12px 9px 12px 0;
+  border-color: transparent;
+  border-radius: 12px;
+  background: transparent;
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+.sidebar-session-item:hover { border-color: #e2eaf7; background: #f8faff; }
+.sidebar-session-item.active { border-color: #cbdafa; background: #f0f5ff; box-shadow: inset 0 0 0 1px rgba(49, 92, 206, 0.04); }
+.sidebar-session-accent { border-radius: 0 4px 4px 0; }
+.sidebar-session-title { color: #23334d; font-size: 0.81rem; line-height: 1.45; }
+.sidebar-session-preview { color: #66768d; font-size: 0.73rem; line-height: 1.45; }
+.sidebar-session-meta { color: #7c8aa0; font-size: 0.69rem; }
+.sidebar-session-delete { color: #b4666d; font-size: 0.69rem; }
+.sidebar-user { padding-top: 16px; }
+.sidebar-user-avatar { width: 34px; height: 34px; background: #315cce; }
+.sidebar-user-copy strong { font-size: 0.78rem; }
+.sidebar-user-copy small { font-size: 0.68rem; }
+.sidebar-mobile-history-toggle { display: none; }
+
+/* 中文说明：任务标题、执行过程、问答和报告使用一致的纸张式卡片。 */
+.session-workspace-shell { max-width: 1540px; gap: 20px; }
+.session-hero-card {
+  min-height: 100px;
+  gap: 18px;
+  padding: 21px 26px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: var(--shadow-md);
+}
+.session-hero-icon { width: 50px; height: 50px; border-radius: 15px; background: #edf3ff; color: var(--accent); }
+.session-compact-copy .eyebrow { color: #5373ad; font-size: 0.7rem; letter-spacing: 0.12em; }
+.session-compact-copy h1 { color: #192940; font-size: clamp(1.18rem, 1.35vw, 1.52rem); line-height: 1.4; }
+.session-compact-copy p { color: #65758c; font-size: 0.81rem; }
+.session-compact-date { color: #61738d; font-size: 0.75rem; }
+.status-pill { min-height: 26px; padding: 0 10px; font-size: 0.73rem; font-weight: 700; }
+.session-workbench,
+.session-workspace-shell[data-timeline-visible="true"] .session-workbench { grid-template-columns: minmax(0, 1fr) 268px; gap: 20px; }
+.session-workspace-shell[data-insights-visible="false"] .session-workbench { grid-template-columns: minmax(0, 1fr); }
+.session-workspace-shell[data-welcome-visible="true"] .session-workbench { grid-template-columns: 1fr; }
+.session-main-column,
+.session-workspace-shell[data-timeline-visible="true"] .session-main-column { gap: 16px; }
+.session-content-area { align-content: start; gap: 16px; padding-bottom: 28px; }
+.session-timeline-card {
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: var(--shadow-md);
+}
+.session-timeline-head { min-height: auto; padding: 0 0 14px; border-bottom: 1px solid #edf1f6; }
+.session-timeline-head h2 { color: #22334c; font-size: 1.02rem; }
+.session-timeline-subtitle { color: #6b7b91; font-size: 0.76rem; line-height: 1.5; }
+.session-timeline-scroll { padding: 0 2px 12px 0; }
+.session-empty { color: #63748b; background: #f9fbfe; }
+.session-empty-large { min-height: 190px; }
+.runtime-event-row { min-height: 73px; padding: 14px; border-color: var(--border); border-radius: 12px; box-shadow: none; }
+.runtime-event-row:hover { border-color: #cbd9f0; background: #fbfcff; }
+.runtime-event-title-line strong { color: #273950; font-size: 0.87rem; }
+.runtime-event-show { color: #66778d; font-size: 0.76rem; }
+.runtime-event-time { color: #6e7e94; font-size: 0.71rem; }
+.runtime-event-tokens { color: #8a99ad; font-size: 0.67rem; }
+.runtime-event-dot { background: #eaf0ff; color: var(--accent); }
+
+.session-conversation,
+.session-final-result { border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-md); }
+.session-conversation { gap: 14px; padding: 20px; }
+.session-conversation h3 { color: #243751; font-size: 0.98rem; }
+.session-conversation-item { max-width: min(86%, 70ch); padding: 14px 18px; border-radius: 16px; background: #f3f6fa; }
+.session-conversation-item.is-user { background: #eaf0ff; }
+.session-conversation-role { color: #5470a8; font-size: 0.75rem; }
+.session-conversation-content { color: #293a53; font-size: 0.9rem; line-height: 1.75; }
+.session-conversation-item.is-assistant .session-conversation-content { white-space: normal; }
+.session-conversation-item.is-assistant .session-conversation-content p { margin: 0 0 0.6rem; }
+.session-conversation-item.is-assistant .session-conversation-content p:last-child { margin-bottom: 0; }
+.session-final-result-head { padding: 18px 24px; }
+.session-final-result-head h3 { color: #243751; font-size: 1rem; }
+.session-final-result-body { width: min(100%, 84ch); color: #25354d; font-size: 1rem; line-height: 1.88; }
+
+/* 中文说明：输入区保持醒目但不遮盖内容，主要操作和停止操作有明确区别。 */
+.session-composer-card,
+.session-workspace-shell[data-timeline-visible="true"] .session-composer-card {
+  padding: 11px;
+  border-color: #d8e3f3;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 38px rgba(31, 52, 85, 0.13);
+}
+.session-composer-textarea { min-height: 50px; padding: 13px 15px; border-radius: 11px; background: #f7f9fd; color: var(--text); font-size: 0.9rem; line-height: 1.6; }
+.session-composer-textarea::placeholder { color: #8694a8; }
+.session-composer-textarea:focus { border-color: #8eabeb; box-shadow: 0 0 0 3px rgba(49, 92, 206, 0.1); }
+.session-composer-send { width: 46px; height: 46px; border-radius: 11px; background: linear-gradient(145deg, #3564dc, #244cbd); box-shadow: 0 7px 16px rgba(49, 92, 206, 0.22); }
+.session-composer-constraints-toggle { color: #536780; font-size: 0.78rem; }
+.session-composer-constraints-panel { border: 1px solid #dbe4f1; border-radius: 14px; background: #fff; }
+.button.primary,
+.settings-page .button.primary { border-color: #315cce; background: #315cce; color: #fff; }
+.button.primary:hover:not(:disabled),
+.settings-page .button.primary:hover:not(:disabled) { border-color: #244cb8; background: #244cb8; color: #fff; }
+.button:focus-visible,
+.icon-button:focus-visible,
+.nav-item:focus-visible,
+.sidebar-session-item:focus-visible,
+.sidebar-mobile-history-toggle:focus-visible,
+.session-welcome-topic-button:focus-visible { outline: 3px solid rgba(49, 92, 206, 0.28); outline-offset: 2px; }
+
+/* 中文说明：右侧概览中的数字和说明增大一级，状态与产物更容易扫读。 */
+.session-insights { gap: 14px; }
+.insight-card { gap: 15px; padding: 19px; border-color: var(--border); border-radius: 17px; box-shadow: var(--shadow-md); }
+.insight-card-heading { color: #5371ad; }
+.insight-card-heading h2 { color: #35465e; font-size: 0.86rem; }
+.insight-status-value strong { font-size: 1rem; }
+.insight-card p { color: #64758c; font-size: 0.76rem; line-height: 1.55; }
+.insight-metric-grid strong { color: #263952; font-size: 0.98rem; }
+.insight-metric-grid span,
+.insight-token-breakdown span { color: #718198; font-size: 0.71rem; }
+.insight-token-total { font-size: 1.1rem; }
+.insight-token-total span { font-size: 0.73rem; }
+.insight-token-breakdown strong { font-size: 0.87rem; }
+.insight-artifact { gap: 10px; padding: 10px; border-radius: 10px; }
+.insight-artifact strong { font-size: 0.76rem; }
+.insight-artifact small,
+.insight-no-output { font-size: 0.71rem; }
+
+/* 中文说明：欢迎页与设置页沿用同一主色和卡片弧度，视觉上属于同一个产品。 */
+.session-workspace-shell[data-welcome-visible="true"] { max-width: 1300px; }
+.session-welcome-heading { gap: 15px; }
+.session-welcome-badge { border-color: #d9e5fc; background: #eaf1ff; color: #315cce; }
+.session-welcome-heading h2 { color: #1d2d46; font-size: clamp(2.1rem, 3.3vw, 3rem); letter-spacing: -0.035em; }
+.session-welcome-heading h2 strong { color: #315cce; }
+.session-welcome-heading p { color: #63758e; font-size: 0.96rem; }
+.session-welcome-prompt-card { gap: 16px; padding: 17px; border-color: #dce5f2; border-radius: 20px; box-shadow: 0 20px 54px rgba(35, 63, 111, 0.1); }
+.session-welcome-input-row { border-color: #e0e8f4; border-radius: 15px; }
+.session-welcome-input-icon { color: #5177ce; }
+.session-composer-card[data-variant="welcome"] .session-composer-textarea { font-size: 1.02rem; }
+.session-composer-card[data-variant="welcome"] .session-composer-send { background: #315cce; box-shadow: 0 10px 22px rgba(49, 92, 206, 0.26); }
+.session-welcome-settings-button,
+.session-welcome-topic-button { min-height: 36px; border-color: #dce5f2; color: #45607f; font-size: 0.78rem; }
+.session-welcome-topic-button:hover { border-color: #a9c2f0; background: #f2f6ff; color: #315cce; }
+.session-welcome-quick-label { color: #315cce; font-size: 0.78rem; }
+.session-welcome-inspiration { color: #75859a; font-size: 0.78rem; }
+
+.settings-page { --settings-blue: #315cce; --settings-text: #1e3049; --settings-muted: #61728a; --settings-border: #e2e9f2; max-width: 1480px; }
+.settings-page .hero-card,
+.settings-page .panel-section,
+.settings-page .state-card,
+.settings-page .metric-card,
+.settings-page .table-card,
+.settings-page .editor-card,
+.settings-page .provider-editor-card,
+.settings-page .provider-create-card { border-radius: 18px; box-shadow: var(--shadow-md); }
+.settings-page .hero-card { padding: 28px 30px; }
+.settings-page .hero-copy h1 { font-size: clamp(1.7rem, 2.2vw, 2.15rem); }
+.settings-page .hero-copy p { color: #64758a; font-size: 0.9rem; }
+.settings-page .metric-card { min-height: 116px; padding: 20px; }
+.settings-page .metric-card span { font-size: 0.86rem; }
+.settings-page .metric-card p { font-size: 0.78rem; }
+.settings-page .panel-section { margin-top: 18px; padding: 24px; }
+.settings-page .section-heading h2 { font-size: 1.18rem; }
+.settings-page .section-heading p { font-size: 0.84rem; }
+.settings-page .button { min-height: 38px; padding: 0 14px; border-radius: 9px; font-size: 0.82rem; }
+.settings-page .provider-tab { min-height: 50px; border-radius: 10px; }
+.settings-page .provider-tab strong { font-size: 0.88rem; }
+.settings-page .provider-tab span { font-size: 0.76rem; }
+.settings-page .field-group span { font-size: 0.8rem; }
+.settings-page .field,
+.settings-page .textarea { min-height: 40px; border-radius: 9px; color: #23344e; font-size: 0.86rem; }
+.settings-page .data-table th { color: #61738c; font-size: 0.76rem; }
+.settings-page .data-table td { color: #34465e; font-size: 0.84rem; }
+.settings-page .read-node-hint,
+.settings-page .mini-note p { color: #62738b; font-size: 0.8rem; line-height: 1.6; }
+
+@media (max-width: 1100px) {
+  .session-workbench,
+  .session-workspace-shell[data-timeline-visible="true"] .session-workbench { grid-template-columns: minmax(0, 1fr); }
+  .session-insights { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 980px) {
+  .app-shell,
+  .app-shell[data-collapsed="true"] { grid-template-columns: 1fr; }
+  /* 中文说明：窄屏把左侧导航收成两行页头，历史会话留在桌面侧栏，
+     避免用户打开手机页面时先滚过一整屏会话列表。 */
+  .sidebar,
+  .sidebar[data-collapsed="true"] {
+    height: auto;
+    min-height: 0;
+    gap: 8px;
+    padding: 12px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-head { min-height: 40px; padding: 0; }
+  .sidebar-nav { display: flex; gap: 8px; padding: 0; border: 0; }
+  .nav-item { flex: 1; justify-content: center; }
+  .sidebar-mobile-history-toggle {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    min-height: 38px;
+    padding: 5px 10px;
+    border: 0;
+    border-radius: 9px;
+    background: #f4f7fc;
+    color: #3c5272;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  .sidebar-mobile-history-toggle span { margin-left: auto; color: #71829a; font-weight: 600; }
+  .sidebar-mobile-history-toggle .rotated { transform: rotate(180deg); }
+  .sidebar-history { display: none; }
+  .sidebar-history[data-mobile-open="true"] {
+    display: grid;
+    max-height: min(50vh, 440px);
+    overflow-y: auto;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .sidebar-user { display: none; }
+  .app-main { padding: 18px; }
+}
+
+@media (max-width: 680px) {
+  .app-main { padding: 12px; }
+  .session-hero-card { padding: 16px; border-radius: 16px; }
+  .session-compact-copy h1 { font-size: 1.1rem; white-space: normal; }
+  .session-insights { grid-template-columns: 1fr; }
+  .session-timeline-card { padding: 15px; }
+  .session-conversation { padding: 15px; }
+  .session-conversation-item { max-width: 100%; }
+  .session-welcome-heading h2 { font-size: 2rem; }
+  .session-welcome-heading p { font-size: 0.84rem; }
+  .session-welcome-prompt-card { padding: 10px; border-radius: 16px; }
+  .session-welcome-input-row { border-radius: 12px; }
+  .settings-page .hero-card,
+  .settings-page .panel-section { padding: 18px; }
+}
