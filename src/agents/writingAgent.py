@@ -982,7 +982,7 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     previous = [{"section_id": item.get("section_id"),
                  "content": _compact_text(item.get("content") or "", max_chars=1000)}
                 for item in (state.get("previous_sections") or []) if isinstance(item, dict)][-3:]
-    tool_results = [_compact_text(item, max_chars=6000) for item in (state.get("tool_results") or [])[-2:]]
+    tool_results = [_compact_writing_tool_result(item) for item in (state.get("tool_results") or [])[-2:]]
     user_prompt = json.dumps(
         {
             "section_id": state.get("section_id"),
@@ -1007,6 +1007,46 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
         ensure_ascii=False,
     )
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def _compact_writing_tool_result(item: JsonObject) -> str:
+    """只把真实切片的编号、页码和短原文放进下一轮写作提示词。"""
+
+    if not isinstance(item, dict):
+        return _compact_text(item, max_chars=6000)
+    # 中文说明：检索结果中的 parent_content 往往比当前切片还长。过去直接把整个
+    # 工具结果截到 6000 字，第一条的父级上下文就占满了空间，后面论文的 chunkId
+    # 被截掉。原始工具结果仍完整留在状态和产物中；这里只整理模型下一轮确实要看的
+    # 几项信息，不修改原文，也不把检索命中当成事实已经得到支持。
+    payload = item.get("fallback") or item.get("result")
+    if not isinstance(payload, dict) or not isinstance(payload.get("chunks"), list):
+        return _compact_text(item, max_chars=6000)
+    shown: list[JsonObject] = []
+    per_paper: dict[str, int] = {}
+    for chunk in payload["chunks"]:
+        if not isinstance(chunk, dict):
+            continue
+        paper_id = str(chunk.get("paperId") or "").strip()
+        chunk_id = str(chunk.get("chunkId") or "").strip()
+        if not paper_id or not chunk_id or per_paper.get(paper_id.casefold(), 0) >= 2:
+            continue
+        shown.append({
+            "paperId": paper_id,
+            "chunkId": chunk_id,
+            "page_start": chunk.get("page_start"),
+            "page_end": chunk.get("page_end"),
+            "content": str(chunk.get("content") or "")[:650],
+        })
+        per_paper[paper_id.casefold()] = per_paper.get(paper_id.casefold(), 0) + 1
+        if len(shown) >= 10:
+            break
+    return json.dumps({
+        "tool": item.get("tool"),
+        "query": payload.get("query"),
+        "status": payload.get("status"),
+        "chunks": shown,
+        "note": "这些只是带原文位置的候选片段；写作前仍须核对是否真的支持主张。",
+    }, ensure_ascii=False)
 
 
 def _abstract_messages(*, topic: str, sections: list[JsonObject], word_count: int,

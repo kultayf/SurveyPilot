@@ -127,6 +127,27 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
     overall_framework = str(analysis_report.get("overall_framework") or "").strip()
     overall_analysis = _compact_overall_analysis(dict(analysis_report.get("overall_analysis") or {}))
     subtopic_analyses = _compact_subtopic_analyses(list(analysis_report.get("subtopic_analyses") or []))
+    # 中文说明：分析报告可能顺带提及没有下载到的著名模型。大纲如果只看分析文字，
+    # 就会给这些模型安排性能比较任务，写作时却找不到原论文。把本次真正解析成功的
+    # 论文名称交给大纲模型，并标出综述类二手材料，让它只规划有原文可查的事实任务。
+    indexed_sources: list[JsonObject] = []
+    for result in state.get("read_results") or []:
+        if not isinstance(result, dict):
+            continue
+        full_text = result.get("full_text") or {}
+        if not isinstance(full_text, dict) or full_text.get("status") != "indexed" or int(full_text.get("chunk_count") or 0) <= 0:
+            continue
+        paper = result.get("paper") or {}
+        if not isinstance(paper, dict):
+            continue
+        title = str(paper.get("title") or "").strip()
+        paper_id = str(paper.get("paperId") or paper.get("id") or "").strip()
+        if title and paper_id:
+            indexed_sources.append({
+                "paperId": paper_id,
+                "title": title,
+                "source_kind": "二手综述" if re.search(r"\b(survey|review|literature review)\b", title, re.IGNORECASE) else "原始研究待核对",
+            })
 
     # 中文说明：大纲约束集中管理，避免大纲格式与后续写作节点的输入约定不一致。
     system_prompt = WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
@@ -140,6 +161,8 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
             "overall_framework": overall_framework,
             "综合分析节点输出": overall_analysis,
             "可使用的子主题分析": subtopic_analyses,
+            "已成功解析全文的论文": indexed_sources,
+            "证据边界": "只有上述原始研究可支持具体架构、实验和数字；二手综述只能用于背景。用户点名但不在原始研究名单中的模型，只能写缺乏原文、无法比较，不能安排其机制或性能事实任务。",
             "输出示例": {
                 "Chapter1": {
                     "title": "相关研究现状",

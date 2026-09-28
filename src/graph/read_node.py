@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -882,6 +883,7 @@ async def _process_papers_concurrently(
         results_by_paper_id,
         paper_runtime_statuses,
         deep_read_limit,
+        topic=topic,
         supplemental_paper_ids=supplemental_paper_ids,
     )
 
@@ -1085,7 +1087,7 @@ def _assign_deep_read_selection(
     results_by_paper_id: dict[str, PaperReadResult],
     paper_runtime_statuses: dict[str, JsonObject],
     deep_read_limit: int,
-    *, supplemental_paper_ids: set[str] | None = None,
+    *, topic: str = "", supplemental_paper_ids: set[str] | None = None,
 ) -> set[str]:
     """按固定分数和稳定排序规则，为全部论文统一分配全文名额。"""
 
@@ -1093,6 +1095,10 @@ def _assign_deep_read_selection(
     # 用户明确设置的总精读上限仍然有效，不会因补搜而扩大费用预算。
     protected = {paper.id for paper in papers if supplemental_paper_ids and paper.id not in supplemental_paper_ids
                  and results_by_paper_id[paper.id].relevance.status == "selected_for_deep_read"}
+    # 中文说明：用户明确要求“只用原论文”时，标题已经表明是综述的论文不能占用
+    # 有限的全文精读名额。它们仍保留在检索和摘要结果中，方便用户看到为何没有入选；
+    # 这一步不猜测其他论文是否一定是原始研究，后续仍须依据全文核查。
+    primary_only = any(term in topic.casefold() for term in ("原论文", "原始研究", "original paper", "primary research", "original study"))
     candidates: list[tuple[int, PaperReadResult]] = []
     for position, paper in enumerate(papers, start=1):
         result = results_by_paper_id[paper.id]
@@ -1101,6 +1107,10 @@ def _assign_deep_read_selection(
         # 中文说明：无论模型是否漏字段，先把三个维度补齐，再由固定表计算 0 到 100 分。
         result.relevance.match_levels = normalize_match_levels(result.relevance.match_levels)
         result.relevance.score = calculate_relevance_score(result.relevance.match_levels)
+        if primary_only and re.search(r"\b(survey|review|meta-analysis)\b|综述", paper.title, re.IGNORECASE):
+            result.relevance.status = "not_eligible"
+            result.full_text = FullTextStatus(status="not_requested", reason="用户要求原论文全文，综述类二手材料不参与全文精读")
+            continue
         if result.relevance.match_levels["research_question"] == "not_match":
             result.relevance.status = "not_eligible"
             result.full_text = FullTextStatus(status="not_requested", reason="核心研究问题不匹配，不参与全文精读")
