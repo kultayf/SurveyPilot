@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from graph import build_graph, run_graph
 from src.agents import ReviewRequest
+from src.agents.searchAgent import SearchIntent, SearchSubtopic
+from src.graph.search_node import _execute_search_intent
 from src.llm.base import LLMResponse
 from src.llm.factory import ProviderSnapshot
 from src.paper_retrieval.models import PaperDocument, SearchResponse
@@ -138,6 +140,38 @@ class GraphTest(unittest.TestCase):
 
         self.assertTrue(hasattr(graph, "invoke"))
         self.assertTrue(hasattr(graph, "ainvoke"))
+
+    def test_search_subtopics_have_a_shared_concurrency_limit(self):
+        """多个子主题不能绕过服务层的单次来源并发限制。"""
+
+        class CountingService:
+            def __init__(self):
+                self.active = 0
+                self.peak = 0
+
+            async def async_search(self, **kwargs):
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                try:
+                    await asyncio.sleep(0.01)
+                    return SearchResponse(
+                        query=kwargs["keyword_expression"],
+                        sources_used=["openalex"],
+                        source_results={"openalex": 0},
+                    )
+                finally:
+                    self.active -= 1
+
+        service = CountingService()
+        intent = SearchIntent(
+            topic="five paper topics",
+            sources=["openalex"],
+            subtopics=[SearchSubtopic(subtopic=f"Topic {index}", keyword=f"Paper {index}") for index in range(5)],
+        )
+
+        asyncio.run(_execute_search_intent(service, intent, runtime_resources=None))
+
+        self.assertEqual(service.peak, 2)
 
     def test_run_graph_returns_ranked_papers(self):
         """验证图执行后会把论文结果写入共享状态与稳定返回值。"""

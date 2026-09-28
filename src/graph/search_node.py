@@ -309,15 +309,22 @@ async def _execute_search_intent(
     """按每个子主题调用检索服务，并把所有候选论文合并到一起。"""
 
     subtopics = intent.subtopics or [SearchSubtopic(subtopic=intent.topic or "综合检索", keyword=" ".join(intent.keywords))]
-    tasks = [
-        _search_one_subtopic(
-            service,
-            intent,
-            subtopic,
-            runtime_resources=runtime_resources,
-        )
-        for subtopic in subtopics
-    ]
+    # 中文说明：没有统一运行时资源的直接调用也可能一次生成多个子主题。
+    # 服务层的信号量只约束“单个子主题里的多个来源”，不能限制全部子主题
+    # 同时向同一外部站点发请求；在这里再给子主题设总上限，避免瞬时放大负载。
+    configured_limit = runtime_resources.limits.search_source_concurrency if runtime_resources is not None else 2
+    subtopic_semaphore = asyncio.Semaphore(max(1, min(2, int(configured_limit))))
+
+    async def _run_bounded(subtopic: SearchSubtopic) -> tuple[SearchSubtopic, SearchResponse]:
+        async with subtopic_semaphore:
+            return await _search_one_subtopic(
+                service,
+                intent,
+                subtopic,
+                runtime_resources=runtime_resources,
+            )
+
+    tasks = [_run_bounded(subtopic) for subtopic in subtopics]
     responses = await asyncio.gather(*tasks)
     return _merge_subtopic_search_responses(responses)
 
