@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
+import subprocess
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
@@ -56,7 +59,7 @@ class ArxivPaperConnector(PaperSearchConnector):
             # arXiv/CDN 返回 406，而 id_list 和 Python 标准库请求都能成功。这里仅对
             # 这个已复现的状态重试一次；401、403、429 等状态必须原样交给上层处理。
             logger.warning("arXiv 关键词请求返回 406，改用标准库重试一次", extra={"http_status": 406})
-            response_text = self._request_with_stdlib(params)
+            response_text = self._request_after_406(params)
         except httpx.ConnectError:
             # 中文说明：少数运行环境中 httpx 会在 DNS 连接阶段失败，而同一个公开 Atom
             # 地址可由标准库正常访问。这里只重放一次同一个 URL；鉴权和限流错误不走这里。
@@ -97,7 +100,7 @@ class ArxivPaperConnector(PaperSearchConnector):
                         raise
                     logger.warning("arXiv 关键词请求返回 406，改用标准库重试一次", extra={"http_status": 406})
                     # 标准库请求会阻塞当前线程，所以异步入口必须把它放到工作线程中执行。
-                    response_text = await asyncio.to_thread(self._request_with_stdlib, params)
+                    response_text = await asyncio.to_thread(self._request_after_406, params)
         finally:
             if owns_client:
                 await resolved_client.aclose()
@@ -106,14 +109,14 @@ class ArxivPaperConnector(PaperSearchConnector):
     def _build_request_params(self, request: SearchRequest) -> dict[str, str | int]:
         """集中生成请求参数，确保正常请求与 406 回退使用完全相同的查询。"""
 
-        arxiv_id = self._explicit_arxiv_id(request)
-        if arxiv_id:
+        arxiv_ids = self._explicit_arxiv_ids(request)
+        if arxiv_ids:
             # 中文说明：用户明确给出 arXiv 编号时，使用 Atom API 的 id_list 精确读取。
-            # 它避免把编号混进自然语言关键词，并保留同一条可审计来源记录。
+            # 多个编号也按 API 原生逗号列表一次读取，避免重复关键词请求与 406。
             return {
-                "id_list": arxiv_id,
+                "id_list": ",".join(arxiv_ids[: request.limit]),
                 "start": 0,
-                "max_results": max(1, request.limit),
+                "max_results": min(max(1, request.limit), len(arxiv_ids)),
             }
         return {
             "search_query": self._build_query(request),
@@ -123,16 +126,20 @@ class ArxivPaperConnector(PaperSearchConnector):
             "sortOrder": "descending",
         }
 
-    def _explicit_arxiv_id(self, request: SearchRequest) -> str | None:
-        """从用户或检索计划的字段识别明确 arXiv 编号。"""
+    def _explicit_arxiv_ids(self, request: SearchRequest) -> list[str]:
+        """优先读取当前子主题的显式编号，再读取用户主题中的编号列表。"""
 
-        values = (request.query, request.keyword_expression, request.topic, *request.keywords)
-        pattern = re.compile(r"(?:arxiv(?:\.org/(?:abs|pdf)/)?\s*:?\s*)?(\d{4}\.\d{4,5}(?:v\d+)?)", re.IGNORECASE)
+        values = (request.keyword_expression, *request.keywords, request.topic, request.query)
+        prefixed = re.compile(r"arxiv(?:\.org/(?:abs|pdf)/)?\s*:?\s*(\d{4}\.\d{4,5}(?:v\d+)?)", re.IGNORECASE)
+        bare = re.compile(r"\d{4}\.\d{4,5}(?:v\d+)?", re.IGNORECASE)
         for value in values:
-            match = pattern.search(str(value or ""))
-            if match:
-                return match.group(1)
-        return None
+            text = str(value or "")
+            matches = prefixed.findall(text)
+            if matches:
+                return list(dict.fromkeys(matches))
+            if bare.fullmatch(text.strip()):
+                return [text.strip()]
+        return []
 
     def _request_with_stdlib(self, params: dict[str, str | int]) -> str:
         """使用 Python 标准库重放一次固定的 arXiv GET 请求。"""
@@ -144,6 +151,45 @@ class ArxivPaperConnector(PaperSearchConnector):
         with urlopen(fallback_request, timeout=20.0) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read().decode(charset, errors="replace")
+
+    def _request_after_406(self, params: dict[str, str | int]) -> str:
+        """标准库同样被 406 拒绝时，再用固定端点做一次受限请求。"""
+
+        try:
+            return self._request_with_stdlib(params)
+        except HTTPError as exc:
+            if exc.code != 406:
+                raise
+            # 中文说明：真实请求中，同一 Atom URL 的 httpx/标准库都返回空体 406，
+            # 而 curl 返回 200。只针对这个明确状态尝试一次；429、鉴权错误和其他
+            # 连接问题不走 curl，失败后仍向上层保留原始 406。
+            logger.warning("arXiv 标准库请求仍返回 406，使用受限 curl 重试一次", extra={"http_status": 406})
+            try:
+                return self._request_with_curl(params)
+            except Exception as fallback_exc:
+                logger.warning("arXiv curl 回退失败", extra={"error_kind": type(fallback_exc).__name__})
+                raise exc from fallback_exc
+
+    def _request_with_curl(self, params: dict[str, str | int]) -> str:
+        """无 shell 调用系统 curl；端点、协议、时间和响应大小均受限。"""
+
+        executable = shutil.which("curl")
+        if executable is None:
+            raise FileNotFoundError("curl unavailable")
+        url = f"{self._endpoint}?{urlencode(params)}"
+        result = subprocess.run(
+            [
+                executable, "--disable", "--silent", "--show-error", "--fail",
+                "--max-time", "20", "--max-filesize", "5000000",
+                "--proto", "=https", "--url", url,
+                "--header", f"User-Agent: {self.headers['User-Agent']}",
+                "--header", f"Accept: {self.headers['Accept']}",
+            ],
+            capture_output=True,
+            check=True,
+            timeout=25,
+        )
+        return result.stdout.decode("utf-8", errors="replace")
 
     def _parse_response_text(self, text: str, request: SearchRequest) -> list[PaperDocument]:
         """把 arXiv XML 响应解析成论文列表，同步和异步入口共用。"""
@@ -214,7 +260,11 @@ class ArxivPaperConnector(PaperSearchConnector):
             if link_type == "application/pdf" and href:
                 pdf_url = href
             if title_attr == "doi" and href:
-                doi = href.rsplit("/", 1)[-1]
+                # 中文说明：DOI 自身包含斜杠。只取 URL 最后一段会把
+                # 10.1088/1742-5468/ac9830 错写成 ac9830，造成不可定位引用。
+                candidate = unquote(urlsplit(href).path.lstrip("/"))
+                if re.match(r"^10\.\d{4,9}/\S+$", candidate):
+                    doi = candidate
         unique_id = doi or paper_id
         return PaperDocument(
             id=unique_id or title,
