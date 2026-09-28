@@ -272,6 +272,15 @@ def _validate_extraction(payload: JsonObject, *, valid_chunk_ids: set[str]) -> J
             raise ValueError(f"全文提取字段 {key} 必须是字符串")
         text = value.strip()
         if text:
+            # 中文说明：模型偶尔把示例里的字段名也抄进方括号，写成
+            # [chunkId:真实编号]。只有去掉这个固定前缀后能精确找到当前论文
+            # 已切出的编号，才恢复成 [真实编号]；其他编号仍按原规则拒绝。
+            text = _CHUNK_CITATION_PATTERN.sub(
+                lambda match: f"[{match.group(1).strip()[8:]}]"
+                if match.group(1).strip().startswith("chunkId:")
+                and match.group(1).strip()[8:] in valid_chunk_ids else match.group(0),
+                text,
+            )
             cited_chunk_ids = _chunk_citation_ids(text)
             if not cited_chunk_ids:
                 raise ValueError(f"全文提取字段 {key} 缺少 chunkId 引用")

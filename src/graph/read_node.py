@@ -804,7 +804,9 @@ def _read_errors(results: list[PaperReadResult]) -> list[JsonObject]:
         ):
             errors.append({"paperId": paper_id, "stage": "vectorize", "reason": result.full_text.reason})
         for warning in result.warnings:
-            if "全文结构化提取失败" in warning:
+            # 中文说明：全文提取失败时，阅读流程仍保留 PDF 和切片。两种提示文案
+            # 都须进入汇总错误，否则界面会显示 4/5 提取成功却误报 errors 为空。
+            if "全文结构化提取失败" in warning or "全文结构化摘要生成失败" in warning:
                 errors.append({"paperId": paper_id, "stage": "extraction", "reason": warning})
     return errors
 
