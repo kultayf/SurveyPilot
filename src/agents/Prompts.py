@@ -288,12 +288,13 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 2. search_section：
 {"action":"tool","tool_name":"search_section","arguments":{"requests":[{"paperId":"<paperId>","chunkIds":["<chunkId>"]}]},"reason":"需要核对该论文对关键实验的原文表述"}
 3. get_chunk_by_embed：
-{"action":"tool","tool_name":"get_chunk_by_embed","arguments":{"query":"医疗影像联邦学习的隐私攻击评测"},"reason":"已有论文没有覆盖该要点，需要定位当前会话全文中的相关原文"}
+{"action":"tool","tool_name":"get_chunk_by_embed","arguments":{"query":"federated learning privacy attack evaluation in medical imaging"},"reason":"已有论文没有覆盖该要点，需要定位当前会话全文中的相关原文"}
 4. 证据足够时写作：
 {"action":"draft","content":"正文内容","paperIds":["<paperId>"],"evidence":[{"paperId":"<paperId>","chunkIds":["<chunkId>"]}]}
 
 取证和写作规则：
 - 工具调用和正文引用只能使用输入中“允许引用的真实论文编号”列出的 paperId；绝不猜编号，也不重复请求已经拿到的资料。
+- 检索英文论文原文时，`get_chunk_by_embed` 的 query 要用论文中的英文方法名和待核查概念或指标；不要只用中文词搜索英文全文。中文原文则使用中文术语。检索词只是找证据，命中后仍须核对原句。
 - 只能使用输入证据和工具结果，不得编造论文观点、数字、因果关系或结论。证据不足时取证或明确写出限制。
 - 比较实验结果前核对数据集划分、指标和设置；验证集与测试集不能直接相减来证明改进。没有同条件证据，不写“显著提升”等收益结论。叙述他人论文时使用“作者”或“该研究”，不使用“我们”。
 - 当论文正文已直接报告所需数字、条件和数据划分时，优先用该正文原句作为 evidence，并据此写来源。只有确实核对过表格列与行时才声称数值来自某张表；不要为增加出处而引用未经核实的解析表格行。
