@@ -159,26 +159,29 @@ def run_writing_node():
             )
             # 矩阵仅作带来源的写作线索，不能把“原文已定位”当成事实核查通过。
             matrix_rows = (state.get("evidence_matrix") or {}).get("rows") or []
-            # 中文说明：以前把整张矩阵的前 1.2 万字符塞进每一次写作调用，
-            # 后面的章节仍反复看到最前面的论文。只取当前任务或分析字段提到的
-            # 论文，并给出可回查的切片编号；其他原文可由写作工具按需获取。
+            # 中文说明：矩阵只是检索入口，不能证明某项实验不存在。保留全部已读
+            # 论文的短行和来源编号，避免后面的论文因取前四行或整体截断而不可见。
             evidence_text = str(section_task.get("task") or "") + json.dumps(section_evidence, ensure_ascii=False)
             related_rows = [row for row in matrix_rows if str(row.get("paperId") or "")
                             and str(row["paperId"]).casefold() in evidence_text.casefold()]
-            selected_rows = (related_rows or matrix_rows)[:4]
+            selected_rows = [*related_rows, *(row for row in matrix_rows if row not in related_rows)]
             matrix_excerpt = json.dumps([
                 {"paperId": row.get("paperId"), "cells": {
-                    key: {"value": str(cell.get("value") or "")[:260],
+                    key: {"value": str(cell.get("value") or "")[:220],
                           "chunkId": str((cell.get("evidence") or [{}])[0].get("chunkId") or "")}
-                    for key, cell in (row.get("cells") or {}).items() if cell.get("value")
+                    for key, cell in (row.get("cells") or {}).items()
+                    if key in {"method", "evaluation_data", "metrics", "results", "baselines"} and cell.get("value")
                 }} for row in selected_rows
-            ], ensure_ascii=False)[:5000]
+            ], ensure_ascii=False)
             if matrix_rows:
                 section_evidence.append({"field": "实证矩阵（可能截断，须用全文工具核对）", "content": matrix_excerpt})
             if (state.get("conflict_report") or {}).get("findings"):
                 section_evidence.append({"field": "跨文献比较线索（须复核条件，不能写成已证实的领域共识）",
                     "content": json.dumps(state["conflict_report"], ensure_ascii=False)[:10000]})
             task_text = str(section_task.get("task") or "")
+            # 中文说明：大纲可能把“还没看到某个数字”误写成“原论文没有数字”。
+            # 全文已索引时必须先查实验表格与附录，不能沿用大纲的缺失预设。
+            task_text += "\n证据边界：大纲中关于某篇已索引原论文未报告实验或指标的说法只是待核假设；先检索该论文实验章节、表格与附录。没有查全时只能说明本次未核实，不得断言原论文没有或原文未提供绝对值。"
             # 每次写作与审稿都读取小节任务，因此这里同时约束初稿和后续重写的语言。
             task_text += f"\n输出语言：{request.language}。正文使用该语言，保留必要的专有名词与原文引句。"
             if state.get("audit_revision"):

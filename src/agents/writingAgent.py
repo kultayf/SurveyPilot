@@ -977,7 +977,8 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     # 这里保留当前小节的任务、来源编号以及最近两次工具证据；截断只影响模型可见
     # 的线索，不会改写本地原文，最终引用仍必须通过逐句证据审计。
     evidence = [{"field": str(item.get("field") or item.get("全局分析字段") or ""),
-                 "content": _compact_text(item.get("content") or item.get("内容") or "", max_chars=1800)}
+                 "content": _compact_text(item.get("content") or item.get("内容") or "",
+                                          max_chars=8000 if item.get("field") == "实证矩阵（可能截断，须用全文工具核对）" else 1800)}
                 for item in (state.get("evidence_map") or []) if isinstance(item, dict)][:5]
     previous = [{"section_id": item.get("section_id"),
                  "content": _compact_text(item.get("content") or "", max_chars=1000)}
