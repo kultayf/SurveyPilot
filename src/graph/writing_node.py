@@ -183,9 +183,19 @@ def run_writing_node():
             task_text += f"\n输出语言：{request.language}。正文使用该语言，保留必要的专有名词与原文引句。"
             if state.get("audit_revision"):
                 # 把上一轮独立核查的具体问题交给写作模型，禁止靠改措辞保留错误事实。
-                issues = [item for item in (state.get("citation_audit") or {}).get("sections", [])
-                          if item.get("section_id") == section_task["section_id"]]
-                task_text += "\n独立核查要求：删除无法证实的事实或通过全文工具找到直接证据，不得仅降低语气掩盖错误。\n" + json.dumps(issues, ensure_ascii=False)[:16000]
+                # 中文注释：审计结果里还包含已通过段落和整段原文引句。把它们全部
+                # 塞回每次写作请求会挤占小节预算，也容易让模型继续改写没问题的句子。
+                # 这里只传本节确实失败的主张与原因；原文仍可由全文工具重新核对。
+                failed_units = [
+                    {"status": unit.get("status"),
+                     "claim": str(unit.get("claim") or "")[:400],
+                     "reason": str(unit.get("reason") or "")[:500]}
+                    for audit_section in (state.get("citation_audit") or {}).get("sections", [])
+                    if audit_section.get("section_id") == section_task["section_id"]
+                    for unit in audit_section.get("units", [])
+                    if unit.get("status") != "supported"
+                ]
+                task_text += "\n独立核查要求：删除无法证实的事实或通过全文工具找到直接证据，不得仅降低语气掩盖错误。\n" + json.dumps(failed_units, ensure_ascii=False)
                 if prior and (prior.get("review") or {}).get("passed") is False:
                     # 中文说明：独立审计通过也不代表本地逐句引用检查通过。
                     # 重写时带上上一轮的具体建议，让模型知道需要修正哪里。
