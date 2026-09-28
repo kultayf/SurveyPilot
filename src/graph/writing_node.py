@@ -159,12 +159,13 @@ def run_writing_node():
             )
             # 矩阵仅作带来源的写作线索，不能把“原文已定位”当成事实核查通过。
             matrix_rows = (state.get("evidence_matrix") or {}).get("rows") or []
-            # 中文说明：矩阵只是检索入口，不能证明某项实验不存在。保留全部已读
-            # 论文的短行和来源编号，避免后面的论文因取前四行或整体截断而不可见。
-            evidence_text = str(section_task.get("task") or "") + json.dumps(section_evidence, ensure_ascii=False)
+            # 中文说明：矩阵只是检索入口，不能证明某项实验不存在。小节任务若
+            # 明确点名论文，就只带这些论文的矩阵行，避免每次模型调用反复发送
+            # 五篇乃至更多无关论文；综合小节未点名时仍保留全部行，不截掉末尾论文。
+            evidence_text = str(section_task.get("task") or "")
             related_rows = [row for row in matrix_rows if str(row.get("paperId") or "")
                             and str(row["paperId"]).casefold() in evidence_text.casefold()]
-            selected_rows = [*related_rows, *(row for row in matrix_rows if row not in related_rows)]
+            selected_rows = related_rows or matrix_rows
             matrix_excerpt = json.dumps([
                 {"paperId": row.get("paperId"), "cells": {
                     key: {"value": str(cell.get("value") or "")[:220],
