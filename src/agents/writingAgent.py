@@ -1014,6 +1014,47 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
 
     if not isinstance(item, dict):
         return _compact_text(item, max_chars=6000)
+    if item.get("tool") == "get_extraction" and isinstance(item.get("result"), list):
+        # 中文注释：结构化摘要可能一次返回多篇论文。过去从头截取 6000 字，
+        # 前一篇的作者和摘要会占满位置，后一篇连切片编号都看不到。现在每篇
+        # 只保留简短说明和完整的原文编号，让模型能继续按编号核对，而不是猜来源。
+        records: list[JsonObject] = []
+        field_names = ("research_topic", "research_object", "methods", "conclusions", "contributions", "limitations")
+        for record in item["result"][:8]:
+            if not isinstance(record, dict):
+                continue
+            paper_id = str(record.get("paperId") or "").strip()
+            extraction = record.get("extraction") or {}
+            if not isinstance(extraction, dict):
+                continue
+            fields: JsonObject = {}
+            for field_name in field_names:
+                value = str(extraction.get(field_name) or "").strip()
+                if not value:
+                    continue
+                # 中文注释：原文编号常放在段尾，先截文字会把它切断。因此从
+                # 完整字段中单独取出编号，再截短解释文字；编号必须原样保留。
+                chunk_ids = [marker for marker in re.findall(r"\[([^\[\]\n]+)\]", value)
+                             if paper_id and marker.casefold().startswith(paper_id.casefold() + ":")]
+                fields[field_name] = {
+                    "text": re.sub(r"\[[^\[\]\n]+\]", "", value).strip()[:260],
+                    "chunkIds": _deduplicate_strings(chunk_ids)[:4 if field_name == "methods" else 2],
+                }
+            note = extraction.get("note") if isinstance(extraction.get("note"), dict) else {}
+            paper_info = extraction.get("paper") if isinstance(extraction.get("paper"), dict) else {}
+            records.append({
+                "paperId": paper_id,
+                "status": record.get("status"),
+                "source": record.get("source"),
+                "title": str(paper_info.get("title") or "")[:180],
+                "fields": fields,
+                "abstract_only_note": {
+                    "summary": str(note.get("short_summary") or "")[:350],
+                    "evidence_level": note.get("evidence_level"),
+                } if note else None,
+            })
+        return json.dumps({"tool": "get_extraction", "papers": records,
+                           "note": "切片编号只是核对入口；摘要或笔记不足以证明正文主张。"}, ensure_ascii=False)
     # 中文说明：检索结果中的 parent_content 往往比当前切片还长。过去直接把整个
     # 工具结果截到 6000 字，第一条的父级上下文就占满了空间，后面论文的 chunkId
     # 被截掉。原始工具结果仍完整留在状态和产物中；这里只整理模型下一轮确实要看的
