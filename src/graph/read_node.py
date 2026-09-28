@@ -1152,6 +1152,39 @@ def _deep_read_needs_processing(result: PaperReadResult) -> bool:
     return result.full_text.status not in {"download_failed", "parse_failed", "no_url"}
 
 
+def _pdf_title_mismatch(paper: PaperDocument, markdown_path: Path) -> str | None:
+    """只在 PDF 首页标题与检索标题明显无关时，拒绝把正文当成这篇论文。"""
+
+    # 中文注释：文件开头的 JSON 标题是我们按检索结果写入的，不能拿它证明 PDF 身份。
+    # 因此只看第一页正文的一级标题；找不到清晰标题时不靠猜测拦截论文。
+    with markdown_path.open("r", encoding="utf-8") as handle:
+        beginning = handle.read(16000)
+    pages = beginning.split("<!-- page:", 2)
+    if len(pages) < 2:
+        return None
+    # 中文注释：解析器有时不给论文题目加井号，而只加粗。只检查首页第一行，
+    # 避免把后面的“引言”或作者姓名误当成题目。
+    first_page = pages[1].split("-->", 1)[-1]
+    first_line = next((line.strip() for line in first_page.splitlines() if line.strip()), "")
+    match = re.fullmatch(r"#\s+(.+)", first_line) or re.fullmatch(r"\*\*(.+)\*\*", first_line)
+    if match is None:
+        return None
+    actual_title = re.sub(r"<[^>]+>|[*_`]", "", match.group(1)).strip()
+    heading_without_number = re.sub(r"^\d+(?:\.\d+)*\s+", "", actual_title).casefold()
+    if heading_without_number in {"abstract", "introduction", "contents", "table of contents"}:
+        return None
+
+    # 中文注释：只拦截几乎肯定拿错文件的情况：两边都有足够多的关键字，
+    # 却一个也对不上。轻微改题、缩写或排版差异不会在这里被判失败。
+    common_words = {"a", "an", "the", "of", "for", "and", "in", "on", "with", "to", "by",
+                    "from", "using", "based", "ai", "agent", "agents", "paper", "study"}
+    expected_words = set(re.findall(r"[a-z0-9]+", paper.title.casefold())) - common_words
+    actual_words = set(re.findall(r"[a-z0-9]+", actual_title.casefold())) - common_words
+    if len(expected_words) >= 3 and len(actual_words) >= 2 and expected_words.isdisjoint(actual_words):
+        return f"PDF 首页标题与检索记录明显不一致：检索为《{paper.title}》，正文为《{actual_title}》"
+    return None
+
+
 async def _run_one_paper_task(
     item: PaperTaskInput,
     *,
@@ -1435,6 +1468,24 @@ async def _read_one_paper(
     if converted.warnings:
         result.warnings.extend(converted.warnings)
     markdown_path = converted.markdown_path
+    if source_path.suffix.lower() == ".pdf":
+        try:
+            title_mismatch = _pdf_title_mismatch(paper, markdown_path)
+        except (OSError, UnicodeError) as exc:
+            title_mismatch = f"无法核对已解析 PDF 的首页标题：{exc}"
+        if title_mismatch:
+            # 中文注释：保留原 PDF 和 Markdown 供人工核对，但不再切块、提取或入库；
+            # 否则别的论文内容可能被误记在当前 DOI 名下，污染矩阵和引用。
+            full_text.status = "parse_failed"
+            full_text.reason = title_mismatch
+            result.full_text = full_text
+            _report_progress(
+                reporter, paper, "paper_completed", completed_counter.current(), total_paper_count,
+                runtime_status="failed", message="PDF 标题不符，已保留摘要阅读结果",
+                current_status=full_text.status, paper_position=item.position,
+                error_message=title_mismatch,
+            )
+            return result
     result.full_text = full_text
     _set_paper_runtime_status(
         paper_runtime_statuses,
