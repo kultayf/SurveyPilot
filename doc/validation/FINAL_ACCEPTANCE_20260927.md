@@ -59,7 +59,7 @@
 - 旧会话 `20260926145928_kvw57lqesdls` 先前因阅读模型 HTTP 429 停在 19/24 篇。2026-09-28 10:32 CST 在当前桌面界面点击“继续执行”，阅读阶段于 10:34 完成，矩阵于 10:35 显示 5 篇、29/60 字段，之后补充检索、补充阅读和子主题分析继续运行。手机宽度下可查看矩阵原文。10:43 因确认污染主动点击“停止当前报告任务”，接口终态 `cancelled`，界面显示“已停止，已保留停止前的处理进度”。这证明 429 后经界面可越过原失败点，不能当成该会话的全流程或质量验收。
 - 污染证据：该会话的 `data/sessions/20260926145928_kvw57lqesdls/artifacts/read/20260928103220_o1c895g4e01k/read_manifest.json` 把 DOI `10.1063/5.0257555`、标题 OpenFOAMGPT、PDF URL `https://arxiv.org/pdf/2501.06327` 标为 `indexed`；但对应 `data/paper_cache/10.1063_5.0257555_22486b5561d1/paper.md` 首页正文实际标题为 **Memory OS of AI Agent**，包含 GVD/LoCoMo 和 49.11% F1 等 MemoryOS 结果，且矩阵把这些内容记在 OpenFOAMGPT 名下。文件头的 OpenFOAMGPT 标题由检索元数据生成，并非 PDF 自证。该会话的 5 篇矩阵论文至少 1 篇身份错误，故整份矩阵不得作为验收依据，也不能把它的索引计数算作有效全文数。
 - 修复在 PDF 转 Markdown 后、切块前读取首页正文首行，仅当它是明确标题且与检索标题的实质词完全无交集时，返回 `parse_failed`，保留 PDF/Markdown 和错误原因，不再提取或索引。对现有 72 份可读缓存扫描，仅上述错配被拦；另 1 份编码损坏未纳入该扫描。定点调用真实阅读分支、只替换转换器为已生成 Markdown，结果为 `parse_failed`、`chunk_count=0`。该规则有意保守：标题缺失或细微错配仍可能漏检，不能称为全量身份保证。
-- 2026-09-28 修复后重跑离线测试：35 项中 31 通过、4 项 live 跳过，编译与 diff 检查通过。新候选来源探针：OpenAlex `ConViT` 与 Semantic Scholar `ConViT` 均返回 HTTP 429；arXiv 公共 Atom 地址有时返回 200，但项目连接器同时查询 `ConViT`、`ViTAE`、`Swin Transformer`、`LocalViT`、`Attention Augmented Convolutions` 时仅 ConViT 返回 3 条，其余四条遇 406（含一次标准库回退）。这不是稳定可用的五篇原论文集合，故尚未启动新完整真实候选；外部来源故障仍是验收风险。
+- 2026-09-28 修复后重跑离线测试：35 项中 31 通过、4 项 live 跳过，编译与 diff 检查通过。新候选来源探针：OpenAlex `ConViT` 与 Semantic Scholar `ConViT` 均返回 HTTP 429；arXiv 公共 Atom 地址有时返回 200，但项目连接器首轮同时查询五个目标名时仅 ConViT 返回 3 条，其余四条遇 406（含标准库回退）。稍后顺序重试时三个查询成功、两个仍为 406，ViTAE 的首条还不是目标原论文；再试扩大结果数又返回 406。这不是稳定可用的五篇原论文集合，故尚未启动新完整真实候选；外部来源故障仍是验收风险。
 
 ## 第一轮候选产物与开销
 
