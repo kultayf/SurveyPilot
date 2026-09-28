@@ -45,6 +45,7 @@ class ScoredPaper:
     abstract_hits: int
     keyword_phrase_in_title: bool
     keyword_phrase_in_abstract: bool
+    named_title_match: bool
     matched_terms: list[str]
 
     def to_dict(self) -> JsonObject:
@@ -57,6 +58,7 @@ class ScoredPaper:
             "abstract_hits": self.abstract_hits,
             "keyword_phrase_in_title": self.keyword_phrase_in_title,
             "keyword_phrase_in_abstract": self.keyword_phrase_in_abstract,
+            "named_title_match": self.named_title_match,
             "matched_terms": list(self.matched_terms),
         }
 
@@ -150,7 +152,7 @@ def run_search_agent_node():
         searchable_papers = _filter_searchable_papers(raw_papers)
         scored_papers = _score_papers(intent, searchable_papers)
         max_results = max(1, intent.max_results)
-        search_results = [item.paper for item in scored_papers[:max_results]]
+        search_results = [item.paper for item in _select_scored_papers(scored_papers, intent.subtopics, max_results)]
         search_scores = [item.to_dict() for item in scored_papers]
         drop_stats = _build_drop_stats(raw_papers, searchable_papers)
         search_output = _build_search_output(state["request"].topic, state["request"].constraints, intent, search_results)
@@ -544,6 +546,7 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
     scoring_sources = [*intent.keywords, *[subtopic.keyword for subtopic in intent.subtopics]]
     tokens = _build_scoring_tokens(scoring_sources)
     phrase_terms = _build_scoring_phrases(scoring_sources)
+    topic_text = _normalize_text(intent.topic)
     threshold = _score_threshold(tokens)
     scored_items: list[ScoredPaper] = []
     for paper in papers:
@@ -553,11 +556,16 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
         abstract_hits = sum(1 for token in tokens if token in abstract_text)
         keyword_phrase_in_title = any(term in title_text for term in phrase_terms)
         keyword_phrase_in_abstract = any(term in abstract_text for term in phrase_terms)
+        # 中文说明：用户明确点名原论文时，标题以该名称加冒号开头，或完整标题
+        # 直接出现在提问中，比摘要里反复提及同一模型的后续变体更值得保留。
+        named_title_match = _matches_named_title(paper, intent.subtopics, topic_text)
         score = float(title_hits * 2.0 + abstract_hits * 1.0)
         if keyword_phrase_in_title:
             score += 3.0
         if keyword_phrase_in_abstract:
             score += 1.5
+        if named_title_match:
+            score += 5.0
         matched_terms = _collect_matched_terms(tokens, phrase_terms, title_text, abstract_text)
         scored_items.append(
             ScoredPaper(
@@ -567,6 +575,7 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
                 abstract_hits=abstract_hits,
                 keyword_phrase_in_title=keyword_phrase_in_title,
                 keyword_phrase_in_abstract=keyword_phrase_in_abstract,
+                named_title_match=named_title_match,
                 matched_terms=matched_terms,
             )
         )
@@ -585,9 +594,55 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
     return selected
 
 
-def _paper_dedupe_key(paper: PaperDocument) -> str:
-    """为论文生成稳定的去重键，优先使用统一后的 paperId。"""
+def _matches_named_title(paper: PaperDocument, subtopics: list[SearchSubtopic], topic_text: str) -> bool:
+    """识别用户点名的完整标题，或以点名模型名开头的原论文标题。"""
 
+    title_text = _normalize_text(paper.title)
+    if len(title_text) >= 20 and title_text in topic_text:
+        return True
+    for subtopic in subtopics:
+        if not _paper_has_subtopic_origin(paper, subtopic):
+            continue
+        keyword = _normalize_text(subtopic.keyword)
+        # 中文说明：复合布尔检索式不是论文名，只有简短名称加冒号的标题才加分。
+        if len(keyword) >= 3 and " and " not in keyword and " or " not in keyword and title_text.startswith(f"{keyword}:"):
+            return True
+    return False
+
+
+def _select_scored_papers(scored: list[ScoredPaper], subtopics: list[SearchSubtopic], limit: int) -> list[ScoredPaper]:
+    """先给有结果的方向各保留一篇，再按全局分数填满有限名额。"""
+
+    if limit < len(subtopics):
+        return scored[:limit]
+    selected: list[ScoredPaper] = []
+    seen: set[str] = set()
+    for subtopic in subtopics:
+        for item in scored:
+            key = _paper_dedupe_key(item.paper)
+            if key not in seen and _paper_has_subtopic_origin(item.paper, subtopic):
+                selected.append(item)
+                seen.add(key)
+                break
+    for item in scored:
+        if len(selected) >= limit:
+            break
+        key = _paper_dedupe_key(item.paper)
+        if key not in seen:
+            selected.append(item)
+            seen.add(key)
+    return selected
+
+
+def _paper_dedupe_key(paper: PaperDocument) -> str:
+    """为论文生成稳定的去重键，合并不同来源给同一长标题分配的编号。"""
+
+    # 中文说明：同一原论文可能分别以出版 DOI 和 arXiv DOI 出现；若只看编号，
+    # 两个版本会占两个精读名额并虚增“全文论文数”。较长且词序完全相同的标题
+    # 才按标题合并；短标题仍按编号，避免误合并同名但不同的工作。
+    title_tokens = re.findall(r"[a-z0-9]+", (paper.title or "").lower())
+    if len(title_tokens) >= 6:
+        return f"title:{' '.join(title_tokens)}"
     paper_id = (paper.paperId or "").strip().lower()
     if paper_id:
         return f"paper_id:{paper_id}"

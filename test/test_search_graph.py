@@ -6,7 +6,7 @@ from unittest.mock import patch
 from graph import build_graph, run_graph
 from src.agents import ReviewRequest
 from src.agents.searchAgent import SearchIntent, SearchSubtopic
-from src.graph.search_node import _execute_search_intent
+from src.graph.search_node import _execute_search_intent, _merge_subtopic_search_responses, _score_papers, _select_scored_papers
 from src.llm.base import LLMResponse
 from src.llm.factory import ProviderSnapshot
 from src.paper_retrieval.models import PaperDocument, SearchResponse
@@ -172,6 +172,54 @@ class GraphTest(unittest.TestCase):
         asyncio.run(_execute_search_intent(service, intent, runtime_resources=None))
 
         self.assertEqual(service.peak, 2)
+
+    def test_named_originals_survive_limited_multi_topic_selection(self):
+        """近年变体不能挤掉用户点名方向的原论文。"""
+
+        convit = SearchSubtopic(subtopic="ConViT", keyword="ConViT")
+        vita = SearchSubtopic(subtopic="ViTAE", keyword="ViTAE")
+
+        def paper(identifier, title, year, origin):
+            return PaperDocument(
+                id=identifier,
+                title=title,
+                abstract="Vision transformer inductive bias for image classification.",
+                year=year,
+                metadata={"search_subtopics": [{"subtopic": origin.subtopic, "keyword": origin.keyword}]},
+            )
+
+        candidates = [
+            paper("variant-1", "Wet-ConViT for Satellite Images", 2025, convit),
+            paper("variant-2", "ConViT for Medical Images", 2024, convit),
+            paper("original-1", "ConViT: Improving Vision Transformers with Soft Convolutional Inductive Biases", 2021, convit),
+            paper("original-2", "ViTAE: Vision Transformer Advanced by Exploring Intrinsic Inductive Bias", 2021, vita),
+        ]
+        intent = SearchIntent(topic="比较 ConViT 和 ViTAE 原论文", subtopics=[convit, vita])
+
+        scored = _score_papers(intent, candidates)
+        selected = _select_scored_papers(scored, intent.subtopics, 2)
+
+        self.assertEqual({item.paper.id for item in selected}, {"original-1", "original-2"})
+        self.assertTrue(all(item.named_title_match for item in selected))
+
+    def test_published_and_arxiv_versions_of_same_paper_merge(self):
+        """同一长标题的出版版和预印本只占一个论文名额。"""
+
+        subtopic = SearchSubtopic(subtopic="Swin", keyword="Swin Transformer")
+        title = "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"
+        published = PaperDocument(id="doi-version", paperId="10.1109/iccv48922.2021.00986", title=title, source="openalex")
+        preprint = PaperDocument(
+            id="arxiv-version", paperId="2103.14030", title=title,
+            source="arxiv", pdf_url="https://arxiv.org/pdf/2103.14030",
+        )
+        merged = _merge_subtopic_search_responses([
+            (subtopic, SearchResponse(query="Swin", papers=[published], sources_used=["openalex"], source_results={"openalex": 1})),
+            (subtopic, SearchResponse(query="Swin", papers=[preprint], sources_used=["arxiv"], source_results={"arxiv": 1})),
+        ])
+
+        self.assertEqual(len(merged.papers), 1)
+        self.assertEqual(merged.papers[0].pdf_url, "https://arxiv.org/pdf/2103.14030")
+        self.assertEqual(merged.papers[0].metadata["found_sources"], ["openalex", "arxiv"])
 
     def test_run_graph_returns_ranked_papers(self):
         """验证图执行后会把论文结果写入共享状态与稳定返回值。"""
