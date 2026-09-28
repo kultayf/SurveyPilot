@@ -70,6 +70,7 @@
 - 随后针对已确认的检索质量问题提交三处改进：`7eb05cb` 为多子主题检索增加总并发上限（直接运行也生效）；`4296b09` 要求歧义简称采用完整名称或最小领域消歧，真实规划探针将 CoaT 生成为 `CoaT vision transformer`，OpenAlex 单次探针曾返回原论文；`21b349c` 在有限候选名额中先覆盖各有结果的子主题、给用户点名的标题加权，并按足够长的相同标题合并 DOI/arXiv 两个版本。旧候选 60 条检索记录用新去重键只剩 56 篇独立论文，ConViT 与 Swin 的出版版/预印本各合并为一篇；旧三项原论文在重排后位于前三。这些是检索层复核，不能替代真实全流程通过。离线测试增至 38 项，34 通过、4 项 live 跳过，语法与 diff 检查通过。
 - 新代码 `21b349c21f474e59246c0e2822978e4d27c3dd77`、原模型与系统配置摘要上启动真实候选 `20260928152025_4d1hk6t6y7b9`（回合 `acceptance-4`，arXiv+OpenAlex，候选上限 24，精读上限 10），主题把 CoaT 完整英文名写明。检索仍为 `partial`：arXiv 五条均 HTTP 406，OpenAlex LocalViT 读超时、CoaT 连接超时，其余三条共返回 72 条原始候选。最终 24 篇候选虽保住 ConViT、ViTAE、Swin 原论文，仍没有 LocalViT、CoaT 原论文。阅读仅选中 6 篇，4 篇全文索引、2 篇无可尝试全文地址，低于每轮至少 5 篇门槛；在分析阶段以 SIGINT 结束（退出码 130）。产物在 `data/acceptance-sessions/sessions/20260928152025_4d1hk6t6y7b9/artifacts/{search,read}/acceptance-4/`，不是通过样本，连续通过仍为 0/3。
 - 候选结束后按五个子主题逐个顺序调用 arXiv+OpenAlex（每条内部两源并发，子主题之间不并发）：arXiv 5/5 仍 HTTP 406；OpenAlex ConViT 连接超时、ViTAE HTTP 429、Swin 返回 10 条、LocalViT 连接超时、CoaT 返回 10 条。独立单次 Semantic Scholar CoaT 查询 HTTP 429。由此并发收口不能单独解决来源不可用，且不应在来源不稳定时把单次探针成功外推为完整候选可通过。
+- 在当前代码 `21b349c` 上重新运行前端 `vue-tsc --noEmit` 和 `vite build`，均成功，Vite 转换 1673 个模块。当前 `config/system.yaml` 的 OpenAlex API key 未配置；OpenAlex 官方认证说明（https://help.openalex.org/api/authentication/）称免费 key 可提升匿名请求的每日额度，已向用户询问是否愿意在本机配置，尚不能把此建议记为 429 修复。arXiv 406 和连接超时也不由 OpenAlex key 解决。
 
 ## 第一轮候选产物与开销
 
