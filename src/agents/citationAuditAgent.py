@@ -89,12 +89,15 @@ class CitationAuditAgent(BaseAgent):
             # 缺席论文的事实便无法核查。这里让摘要和正文一样，每篇至少有一个候选位置；
             # 最多八段的上限仍然保留，超过上限的事实不能因此自动通过。
             source_ids = allowed_ids if abstract else cited
-            candidate_limit = min(8, max(4, len(source_ids)))
-            ranked = bm25_rank(unit, allowed, candidate_limit)
             # 优先检查写作时已定位的切片，再补关键词候选，避免双语措辞导致漏检。
             bound_ids = [str(c.get("chunkId") or "") for binding in evidence
                          if str(binding.get("claim") or "") and (str(binding["claim"]) in unit or unit in str(binding["claim"]))
                          for c in binding.get("chunks") or []]
+            # 中文说明：一段可能有五个事实句、四个不同的原文切片。旧版固定只给
+            # 单论文四个位置，还先放方法概述候选，导致写作时确实定位的末尾切片
+            # 被挤掉。按不同切片的数量适度增加位置，最多仍为八个。
+            candidate_limit = min(8, max(4, len(source_ids), len(set(bound_ids))))
+            ranked = bm25_rank(unit, allowed, candidate_limit)
             # 中文说明：中文综述对英文原文做关键词排序时，容易把表格或章节标题
             # 排在真正的方法定义前面。阅读阶段提取的英文方法说明只作为检索词，
             # 用它从同一篇已索引原文里找候选；说明本身绝不交给核查模型充当证据。
@@ -105,8 +108,14 @@ class CitationAuditAgent(BaseAgent):
                 paper_chunks = [chunk for chunk in allowed if canonical(chunk.paperId) == paper_id]
                 hint = str((source_hints or {}).get(paper_id) or "").strip()
                 matches = bm25_rank(hint or unit, paper_chunks, 2 if hint else 1)
+                # 中文说明：每篇论文先留一个位置。若正文作者已经给本段绑定了
+                # 该篇真实切片，优先让独立审计看到它；没有绑定再用英文方法线索
+                # 找候选。绑定只决定“看哪段原文”，绝不决定事实是否受支持。
+                paper_bound = next((chunk_id for chunk_id in bound_ids
+                                    if chunk_id in by_id and canonical(by_id[chunk_id].paperId) == paper_id), "")
+                if paper_bound or matches:
+                    per_paper_ids.append(paper_bound or matches[0][0])
                 if matches:
-                    per_paper_ids.append(matches[0][0])
                     secondary_ids.extend(chunk_id for chunk_id, _ in matches[1:])
             candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + secondary_ids
                                                + [chunk_id for chunk_id, _ in ranked]))
@@ -143,6 +152,8 @@ class CitationAuditAgent(BaseAgent):
              "核查语义是否由原文推出，不要求中文转述逐字出现在英文原文中。"
              "数字、指标、数据划分与实验条件必须逐项一致；不同条件的数字差值不能证明方法收益。"
              "quote 必须逐字复制 sources.text，保留其中 Markdown 标记、标点与换行，不得清理格式或改写。"
+             "每个独立事实至少给出一条足够具体的原文引句；尽量选 8 到 30 个英文词的连续普通文字，逐字复制，不要转述。"
+             "遇到乱码、残缺公式或表格时，只能引用同一片段中能直接支持事实且没有乱码的连续文字；若关键事实只能靠损坏部分验证，就判 insufficient。"
              "若正文原句已经独立支持全部事实，优先引用该原句；只在确需表格才能支持的事实时引用表格行。"
              '只输出 {"verdicts":[{"index":0,"status":"supported|insufficient|contradicted|not_required",'
              '"reason":"解释","evidence":[{"chunkId":"编号","quote":"连续原文"}]}]}。'},
@@ -209,14 +220,36 @@ class CitationAuditAgent(BaseAgent):
             if not isinstance(status, str) or status not in {"supported", "insufficient", "contradicted", "not_required"}:
                 continue
             verified_quotes = []
+            verified_raw_count = 0
             raw_evidence = verdict.get("evidence")
             for source in raw_evidence if isinstance(raw_evidence, list) else []:
                 if not isinstance(source, dict):
                     continue
                 chunk = candidate_maps[index].get(str(source.get("chunkId") or ""))
                 quote = str(source.get("quote") or "").strip()
-                if chunk and len(quote) >= 4 and quote in chunk.content[:2400]:
-                    verified_quotes.append({"chunkId": chunk.chunk_id, "paperId": chunk.paperId, "quote": quote,
+                if not chunk or len(quote) < 4:
+                    continue
+                source_text = chunk.content[:2400]
+                fragments = [quote] if quote in source_text else re.split(r"\s*(?:\.{3}|…)\s*", quote)
+                # 中文说明：模型偶尔把同一原文句子的两部分用“...”省略中间内容。
+                # 省略号本身不是原文，不能把拼接文字冒充逐字引句；仅当两段原字
+                # 在同一个切片里按顺序出现、相距不超过 160 字符，才分别保存。
+                if len(fragments) > 1 and (len(fragments) > 3 or any(len(part) < 8 for part in fragments)):
+                    continue
+                cursor = 0
+                located_fragments = []
+                for fragment in fragments:
+                    position = source_text.find(fragment, cursor)
+                    if position < 0 or (located_fragments and position - cursor > 160):
+                        located_fragments = []
+                        break
+                    located_fragments.append(fragment)
+                    cursor = position + len(fragment)
+                if not located_fragments:
+                    continue
+                verified_raw_count += 1
+                for fragment in located_fragments:
+                    verified_quotes.append({"chunkId": chunk.chunk_id, "paperId": chunk.paperId, "quote": fragment,
                                             "page_start": chunk.page_start, "page_end": chunk.page_end})
             quoted_papers = {canonical(source["paperId"]) for source in verified_quotes}
             reason = str(verdict.get("reason") or "")
@@ -229,7 +262,7 @@ class CitationAuditAgent(BaseAgent):
                 status = "insufficient"
                 reason = "证据含解析表格或无法识别的字符，需对照原 PDF 核对列归属、数字与公式后再使用。模型说明：" + reason
             if status == "supported" and (not verified_quotes or not isinstance(raw_evidence, list)
-                or len(verified_quotes) != len(raw_evidence)
+                or verified_raw_count != len(raw_evidence)
                 or (not abstract and (not cited_sets[index] or not cited_sets[index].issubset(quoted_papers)))):
                 status = "insufficient"
                 # 模型的口头判断不能覆盖原句检查；向用户解释最终没有通过的真实原因。
