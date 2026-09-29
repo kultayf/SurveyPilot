@@ -685,7 +685,10 @@ def normalize_writing_section_citations(
     scoped_chunks = {chunk.chunk_id: chunk for chunk in load_scoped_chunks(cache_dir, [*read_results, *session_read_results])}
     located: list[JsonObject] = []
     invalid: list[JsonObject] = []
-    sentences = set(_citation_sentences(content))
+    # 中文说明：模型写跨论文比较时常用分号分隔各论文的独立事实，且在 evidence
+    # 里复制分句时省略末尾的句号或分号。忽略这些纯标点差异即可精确对应原句，
+    # 不能因此把一个分句的原文证据借给同段其他分句。
+    sentences = {sentence.rstrip("。！？!?；;").strip() for sentence in _citation_sentences(content)}
     for item in normalized.pop("claim_evidence", []):
         if not isinstance(item, dict):
             continue
@@ -695,7 +698,7 @@ def normalize_writing_section_citations(
         # 中文说明：旧的“每篇论文一组切片”会把同一组原文自动贴到这篇论文的
         # 所有句子上，令无依据的新主张也显示为已有切片。现在必须由模型逐句
         # 指明完整事实句；句子不存在或句中没有引用该论文时，不建立有效绑定。
-        if not claim or claim not in sentences:
+        if not claim or claim.rstrip("。！？!?；;").strip() not in sentences:
             invalid.append({"claim": claim, "paperId": paper_id, "chunkIds": chunk_ids,
                             "reason": "证据主张必须是正文中含引用的完整事实句"})
             continue
@@ -730,7 +733,9 @@ def _citation_sentences(content: str) -> list[str]:
 
     raw_parts = [
         part.strip()
-        for part in re.split(r"(?<=[。！？!?])\s*|(?<=\.)\s+|\n+", str(content or ""))
+        # 中文说明：分号既能隔开两个事实，也能出现在 [P1;P2] 这样的合并引用里。
+        # 只拆分引用方括号之外的分号，否则会把一个真实编号拆成两段假句子。
+        for part in re.split(r"(?<=[。！？!?])\s*|(?<=[；;])(?![^\[\]]*\])\s*|(?<=\.)\s+|\n+", str(content or ""))
         if part.strip()
     ]
     sentences: list[str] = []
@@ -978,7 +983,7 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     # 的线索，不会改写本地原文，最终引用仍必须通过逐句证据审计。
     evidence = [{"field": str(item.get("field") or item.get("全局分析字段") or ""),
                  "content": _compact_text(item.get("content") or item.get("内容") or "",
-                                          max_chars=8000 if item.get("field") == "实证矩阵（可能截断，须用全文工具核对）" else 1800)}
+                                          max_chars=4000 if item.get("field") == "实证矩阵的原文位置（不是事实结论）" else 1800)}
                 for item in (state.get("evidence_map") or []) if isinstance(item, dict)][:5]
     previous = [{"section_id": item.get("section_id"),
                  "content": _compact_text(item.get("content") or "", max_chars=1000)}
@@ -989,7 +994,7 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
             "section_id": state.get("section_id"),
             "小节任务": str(state.get("task") or "")[:4500],
             "计划字数": state.get("word_count"),
-            "全局分析提供的证据": evidence,
+            "上游分析的待核线索（不是原文证据）": evidence,
             "已经写好的前置小节": previous,
             "已调用工具得到的资料": tool_results,
             "允许引用的真实论文编号": state.get("available_paper_ids") or [],

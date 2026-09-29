@@ -11,7 +11,6 @@ from src.agents.writingAgent import (
     build_writing_agent,
     load_writing_agent_llm,
 )
-from src.agents.writingOutlineAgent import OVERALL_ANALYSIS_FIELDS
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.graph.state_models import JsonObject, State
@@ -44,7 +43,6 @@ def run_writing_node():
         outline = dict(state.get("writing_outline") or {})
         if not outline:
             raise ValueError("写作节点缺少写作大纲，无法知道要写哪些小节")
-        overall_analysis = dict(dict(state.get("analysis_report") or {}).get("overall_analysis") or {})
 
         reporter = _resolve_reporter(state)
         llm = _resolve_llm(state)
@@ -153,11 +151,10 @@ def run_writing_node():
                 requested_refs=list(section_task.get("ref_sections") or []),
                 written_sections=written_sections,
             )
-            section_evidence = _resolve_section_evidence(
-                evidence_fields=list(section_task.get("evidence_map") or []),
-                overall_analysis=overall_analysis,
-            )
-            # 矩阵仅作带来源的写作线索，不能把“原文已定位”当成事实核查通过。
+            # 中文说明：第十三轮的综合分析错误地把 GCN 的线性扩展写成内存瓶颈。
+            # 这类模型归纳不再送给正文作者；大纲里的 evidence-map 仍可用于规划，
+            # 写作时只给原文切片位置，让作者自己打开原文核对。
+            section_evidence: list[JsonObject] = []
             matrix_rows = (state.get("evidence_matrix") or {}).get("rows") or []
             # 中文说明：矩阵只是检索入口，不能证明某项实验不存在。小节任务若
             # 明确点名论文，就只带这些论文的矩阵行，避免每次模型调用反复发送
@@ -167,26 +164,22 @@ def run_writing_node():
                             and str(row["paperId"]).casefold() in evidence_text.casefold()]
             selected_rows = related_rows or matrix_rows
             matrix_excerpt = json.dumps([
-                {"paperId": row.get("paperId"), "cells": {
-                    key: {"value": str(cell.get("value") or "")[:220],
-                          "chunkId": str((cell.get("evidence") or [{}])[0].get("chunkId") or "")}
+                {"paperId": row.get("paperId"), "chunkIds": list(dict.fromkeys(
+                    str(citation.get("chunkId") or "")
                     for key, cell in (row.get("cells") or {}).items()
-                    if key in {"method", "evaluation_data", "metrics", "results", "baselines"} and cell.get("value")
-                }} for row in selected_rows
+                    if key in {"method", "evaluation_data", "metrics", "results", "baselines"}
+                    for citation in (cell.get("evidence") or [])
+                    if isinstance(citation, dict) and citation.get("chunkId")
+                ))} for row in selected_rows
             ], ensure_ascii=False)
             if matrix_rows:
-                section_evidence.append({"field": "实证矩阵（可能截断，须用全文工具核对）", "content": matrix_excerpt})
-            if (state.get("conflict_report") or {}).get("findings"):
-                section_evidence.append({"field": "跨文献比较线索（须复核条件，不能写成已证实的领域共识）",
-                    "content": json.dumps(state["conflict_report"], ensure_ascii=False)[:10000]})
-            # 中文说明：大纲是模型生成的，可能漏掉用户亲自写明的篇数、禁写项目或
-            # 小节数量限制。每节写作都再次看到原始要求；若两者冲突，以用户要求为准。
-            # 放在任务开头，是为了后续缩短长提示词时仍能保留这些硬边界。
-            task_text = ("用户原始要求（优先于大纲）：" + str(request.topic or "")[:1600]
-                         + "\n当前小节任务：" + str(section_task.get("task") or ""))
-            # 中文说明：大纲可能把“还没看到某个数字”误写成“原论文没有数字”。
-            # 全文已索引时必须先查实验表格与附录，不能沿用大纲的缺失预设。
-            task_text += "\n证据边界：大纲中关于某篇已索引原论文未报告实验或指标的说法只是待核假设；先检索该论文实验章节、表格与附录。没有查全时只能说明本次未核实，不得断言原论文没有或原文未提供绝对值。"
+                section_evidence.append({"field": "实证矩阵的原文位置（不是事实结论）", "content": matrix_excerpt})
+            # 中文说明：第十三轮的大纲 task 把 GCN 的线性扩展误写成内存瓶颈，
+            # 即使提醒作者“仅作线索”，实际正文仍照抄。大纲只决定章节结构、
+            # 标题和字数；正文的事实范围由用户原始要求与可核实原文决定。
+            task_text = ("用户原始要求（唯一内容边界）：" + str(request.topic or "")[:1600]
+                         + "\n当前小节标题：" + str(section_task.get("section_title") or section_task["section_id"]))
+            task_text += "\n写作范围：只回答用户要求中与本小节标题对应的问题。大纲任务细节和前文均未通过原文核查，不得补入未要求的方法痛点、效率、硬件或研究空白。每句论文事实先查原文，证据不支持就删去；已索引原文是否缺少某数字须检查实验章节、表格与附录，未查全不得断言不存在。"
             # 每次写作与审稿都读取小节任务，因此这里同时约束初稿和后续重写的语言。
             task_text += f"\n输出语言：{request.language}。正文使用该语言，保留必要的专有名词与原文引句。"
             if state.get("audit_revision"):
@@ -482,11 +475,12 @@ def _flatten_outline(outline: JsonObject) -> list[JsonObject]:
 
 
 def _resolve_previous_sections(*, requested_refs: list[Any], written_sections: list[JsonObject]) -> list[JsonObject]:
-    """根据大纲里的 ref-sections 找出当前小节需要参考的前文。
+    """根据大纲里的 ref-sections 找出已写小节，但不转发未经审计的正文。
 
     中文注释：
     ref-sections 可能写成 Chapter1.section2，也可能只写 Chapter1。
     这里做最简单的匹配：完整小节编号精确匹配，章节编号匹配该章节下所有已写小节。
+    旧正文可能含有未核实的判断，只保留编号帮助作者知道哪些小节已经完成。
     """
 
     if not requested_refs:
@@ -504,31 +498,11 @@ def _resolve_previous_sections(*, requested_refs: list[Any], written_sections: l
             resolved.append(
                 {
                     "section_id": section_id,
-                    "content": str(section.get("content") or ""),
-                    "cited_paper_ids": list(section.get("cited_paper_ids") or []),
+                    "content": "",
                 }
             )
             seen.add(section_id)
     return resolved
-
-
-def _resolve_section_evidence(*, evidence_fields: list[Any], overall_analysis: JsonObject) -> list[JsonObject]:
-    """按 evidence-map 指定的字段，从全局分析中取出当前小节可用的证据。"""
-
-    evidence: list[JsonObject] = []
-    used_fields: set[str] = set()
-    for item in evidence_fields:
-        field = str(item or "").strip()
-        # 中文说明：大纲由模型生成，先核对字段名，避免把标题或其他说明误当成证据。
-        if field not in OVERALL_ANALYSIS_FIELDS or field in used_fields:
-            continue
-        content = str(overall_analysis.get(field) or "").strip()
-        # 中文说明：空字段不能支撑正文，因此不传给写作 Agent；它会按原有流程补充论文证据。
-        if not content:
-            continue
-        evidence.append({"全局分析字段": field, "内容": content})
-        used_fields.add(field)
-    return evidence
 
 
 def _build_writing_report(
