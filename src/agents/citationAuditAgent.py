@@ -82,9 +82,14 @@ class CitationAuditAgent(BaseAgent):
                 invalid_units.add(item["index"])
                 item.update(status="invalid_citation", reason="存在未知引用或原文归属错误")
             # 摘要允许由已用论文共同支撑；正文事实必须有实际引用，不能自动补证后假装原稿正确。
-            allowed_ids = set(ref_ids.values()) if abstract else cited
+            allowed_ids = {paper_id for paper_id in ref_ids.values() if paper_id} if abstract else cited
             allowed = [c for c in chunks if canonical(c.paperId) in allowed_ids]
-            candidate_limit = min(8, max(4, len(cited)))
+            # 中文说明：摘要不写论文编号，但会概括正文真正引用的多篇论文。
+            # 若仍按“本段引用数为零”只取四段，五篇论文的摘要至多只看到四篇，
+            # 缺席论文的事实便无法核查。这里让摘要和正文一样，每篇至少有一个候选位置；
+            # 最多八段的上限仍然保留，超过上限的事实不能因此自动通过。
+            source_ids = allowed_ids if abstract else cited
+            candidate_limit = min(8, max(4, len(source_ids)))
             ranked = bm25_rank(unit, allowed, candidate_limit)
             # 优先检查写作时已定位的切片，再补关键词候选，避免双语措辞导致漏检。
             bound_ids = [str(c.get("chunkId") or "") for binding in evidence
@@ -94,7 +99,7 @@ class CitationAuditAgent(BaseAgent):
             # 一两篇，所以每个实际被引用的论文至少尝试给出一条本篇候选；
             # 这只扩大可核查范围，不等于这些片段已经支持正文。
             per_paper_ids = [match[0][0]
-                             for paper_id in sorted(cited)
+                             for paper_id in sorted(source_ids)
                              if (match := bm25_rank(unit, [chunk for chunk in allowed
                                                            if canonical(chunk.paperId) == paper_id], 1))]
             candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + [chunk_id for chunk_id, _ in ranked]))

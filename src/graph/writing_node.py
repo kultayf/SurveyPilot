@@ -179,7 +179,11 @@ def run_writing_node():
             if (state.get("conflict_report") or {}).get("findings"):
                 section_evidence.append({"field": "跨文献比较线索（须复核条件，不能写成已证实的领域共识）",
                     "content": json.dumps(state["conflict_report"], ensure_ascii=False)[:10000]})
-            task_text = str(section_task.get("task") or "")
+            # 中文说明：大纲是模型生成的，可能漏掉用户亲自写明的篇数、禁写项目或
+            # 小节数量限制。每节写作都再次看到原始要求；若两者冲突，以用户要求为准。
+            # 放在任务开头，是为了后续缩短长提示词时仍能保留这些硬边界。
+            task_text = ("用户原始要求（优先于大纲）：" + str(request.topic or "")[:1600]
+                         + "\n当前小节任务：" + str(section_task.get("task") or ""))
             # 中文说明：大纲可能把“还没看到某个数字”误写成“原论文没有数字”。
             # 全文已索引时必须先查实验表格与附录，不能沿用大纲的缺失预设。
             task_text += "\n证据边界：大纲中关于某篇已索引原论文未报告实验或指标的说法只是待核假设；先检索该论文实验章节、表格与附录。没有查全时只能说明本次未核实，不得断言原论文没有或原文未提供绝对值。"
