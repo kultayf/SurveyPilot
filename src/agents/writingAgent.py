@@ -685,13 +685,24 @@ def normalize_writing_section_citations(
     scoped_chunks = {chunk.chunk_id: chunk for chunk in load_scoped_chunks(cache_dir, [*read_results, *session_read_results])}
     located: list[JsonObject] = []
     invalid: list[JsonObject] = []
-    chunks_by_paper: dict[str, list[TextChunk]] = {}
+    sentences = set(_citation_sentences(content))
     for item in normalized.pop("claim_evidence", []):
         if not isinstance(item, dict):
             continue
         claim = str(item.get("claim") or "").strip()
         paper_id = str(item.get("paperId") or "").strip()
         chunk_ids = _string_list(item.get("chunkIds"))
+        # 中文说明：旧的“每篇论文一组切片”会把同一组原文自动贴到这篇论文的
+        # 所有句子上，令无依据的新主张也显示为已有切片。现在必须由模型逐句
+        # 指明完整事实句；句子不存在或句中没有引用该论文时，不建立有效绑定。
+        if not claim or claim not in sentences:
+            invalid.append({"claim": claim, "paperId": paper_id, "chunkIds": chunk_ids,
+                            "reason": "证据主张必须是正文中含引用的完整事实句"})
+            continue
+        if not _text_cites_paper(claim, paper_id):
+            invalid.append({"claim": claim, "paperId": paper_id, "chunkIds": chunk_ids,
+                            "reason": "证据主张的句子没有引用这篇论文"})
+            continue
         if not paper_id or not chunk_ids:
             invalid.append({"claim": claim, "paperId": paper_id, "reason": "证据缺少论文编号或切片编号"})
             continue
@@ -707,32 +718,8 @@ def normalize_writing_section_citations(
         if len(valid_chunks) != len(chunk_ids):
             invalid.append({"claim": claim, "paperId": paper_id, "chunkIds": chunk_ids, "reason": "切片不存在、超出会话范围或不属于这篇论文"})
             continue
-        bucket = chunks_by_paper.setdefault(paper_id.casefold(), [])
-        for chunk in valid_chunks:
-            if all(saved.chunk_id != chunk.chunk_id for saved in bucket):
-                bucket.append(chunk)
-        if claim and claim in source_content:
-            located.append({"claim": claim, "paperId": paper_id, "status": "source_located",
-                            "binding_source": "model_claim", "chunks": [chunk.to_dict() for chunk in valid_chunks]})
-        elif not _text_cites_paper(content, paper_id):
-            invalid.append({"claim": claim, "paperId": paper_id, "chunkIds": chunk_ids,
-                            "reason": "正文没有使用这篇论文的引用编号"})
-
-    # 模型经常把英文原文误填入 claim。这里不相信它的 claim 文本，而是从正文中实际出现的
-    # `[paperId]` 逐句建立候选证据关系。这个关系只表示“位置有效”；后续独立审计仍须判断
-    # 每个事实是否真的由原文支持，因此不会因自动绑定而放宽最终门禁。
-    for sentence in _citation_sentences(content):
-        for raw_marker in re.findall(r"\[([^\[\]\n]+)\]", sentence):
-            for raw_id in re.split(r"[,;，；]\s*", raw_marker):
-                paper_id = _resolve_citation_paper_id(raw_id, chunk_to_paper)
-                candidates = chunks_by_paper.get(paper_id.casefold(), [])
-                if not candidates:
-                    continue
-                if any(item["paperId"].casefold() == paper_id.casefold()
-                       and (item["claim"] in sentence or sentence in item["claim"]) for item in located):
-                    continue
-                located.append({"claim": sentence, "paperId": paper_id, "status": "source_located",
-                                "binding_source": "citation_marker", "chunks": [chunk.to_dict() for chunk in candidates]})
+        located.append({"claim": claim, "paperId": paper_id, "status": "source_located",
+                        "binding_source": "model_claim", "chunks": [chunk.to_dict() for chunk in valid_chunks]})
     normalized["citation_evidence"] = located
     normalized["invalid_citation_evidence"] = invalid
     return normalized

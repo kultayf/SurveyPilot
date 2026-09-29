@@ -294,7 +294,7 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 3. get_chunk_by_embed：
 {"action":"tool","tool_name":"get_chunk_by_embed","arguments":{"query":"federated learning privacy attack evaluation in medical imaging"},"reason":"已有论文没有覆盖该要点，需要定位当前会话全文中的相关原文"}
 4. 证据足够时写作：
-{"action":"draft","content":"正文内容","paperIds":["<paperId>"],"evidence":[{"paperId":"<paperId>","chunkIds":["<chunkId>"]}]}
+{"action":"draft","content":"正文内容","paperIds":["<paperId>"],"evidence":[{"claim":"正文中含引用的完整事实句","paperId":"<paperId>","chunkIds":["<chunkId>"]}]}
 
 取证和写作规则：
 - 工具调用和正文引用只能使用输入中“允许引用的真实论文编号”列出的 paperId；绝不猜编号，也不重复请求已经拿到的资料。
@@ -309,7 +309,7 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 - 正文中的每个论文观点、结果或比较都要在同一句末尾标注对应 [paperId]；paperIds 只填写实际使用的编号。
 - 跨论文综合不要用一句概括性判断后一次挂上所有论文编号。每句只比较原文确实能分别支持的具体机制，按涉及的论文逐个给出真实 chunkId；无法逐篇定位时删去该比较，不要用领域常识填补。用户若限定综合小节数量或禁止某类比较，必须照办。
 - 每个独立的事实句都要自己带引用；“首先”“其次”“然而”“综上”等过渡句只要陈述了论文事实或比较，也不能借用下一句的引用。
-- 草稿必须包含 evidence 数组，列出正文实际使用的真实 paperId 和子片段 chunkIds；每篇被引用论文至少提供一项。程序会按正文中的 [paperId] 逐句建立候选关系，再由独立审计判断是否真正支持，不能靠多填 chunkIds 通过。父级上下文只帮助理解，不能将父块其他内容冒充子片段证据；没有可用原文时 evidence 写 [] 并明确证据不足。检索分数不代表事实可信度。
+- 草稿必须包含 evidence 数组。每条 evidence 的 claim 必须逐字复制正文中一个带 [paperId] 的完整事实句（包括句末引用），并为该句实际引用的每篇论文分别提供真实 paperId 和支持这句话的子片段 chunkIds。不能只列“每篇论文的一组切片”，再让同一组切片自动绑定该论文的所有句子；不同主张即使引用同一篇，也要逐句核对。程序只检查句子、论文和切片位置是否对应，随后由独立审计判断原文是否真正支持；父级上下文不能冒充子片段证据，没有可用原文时应删除该事实，不能靠多填 chunkIds 通过。检索分数不代表事实可信度。
 - evidence 中的 chunkIds 必须从已提供的原文结果原样复制完整编号，不要只写冒号后半段，不要留空或猜测。若某篇论文没有可用的真实切片，就不要把它写进正文事实句或 paperIds。
 - 最终只输出合法 JSON，不要输出 Markdown 代码块、解释文字、思考过程或额外字段。
 
@@ -318,7 +318,7 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 {"action":"tool","tool_name":"get_extraction","arguments":{"paperIds":["P1"]},"reason":"当前只有通信指标，缺少本节需要的隐私威胁和实验结果证据"}
 
 证据已经包含 P1、P2 的方法和限制时：
-{"action":"draft","content":"现有研究首先将联邦聚合用于多医院影像分割，以减少原始数据集中传输，但其效果仍受机构间数据分布差异影响。[P1] 随后的个性化聚合方法针对这一差异调整各机构模型，部分结果显示少数机构的稳定性有所改善。[P2] 不同论文的医院划分和评价指标并不一致，因此不能据此断言个性化方法在所有场景都更优。[P1,P2]","paperIds":["P1","P2"],"evidence":[{"paperId":"P1","chunkIds":["<P1 的真实 chunkId>"]},{"paperId":"P2","chunkIds":["<P2 的真实 chunkId>"]}]}
+{"action":"draft","content":"研究 P1 将联邦聚合用于多医院影像分割。[P1] 研究 P2 针对机构间数据差异调整各机构模型。[P2]","paperIds":["P1","P2"],"evidence":[{"claim":"研究 P1 将联邦聚合用于多医院影像分割。[P1]","paperId":"P1","chunkIds":["<P1 的真实 chunkId>"]},{"claim":"研究 P2 针对机构间数据差异调整各机构模型。[P2]","paperId":"P2","chunkIds":["<P2 的真实 chunkId>"]}]}
 
 输出前自检：当前动作是否只有一个？工具参数是否都能在输入中找到？正文每个事实是否有证据和 [paperId]？是否把“不知道”写成了“已经证明”？
 """.strip()
