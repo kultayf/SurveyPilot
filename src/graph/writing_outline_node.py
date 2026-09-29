@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, cast
 
 from src.agents.writingOutlineAgent import (
@@ -59,6 +60,11 @@ def run_writing_outline_node():
         used_llm = outline is not None and reason == "ok"
         if outline is None:
             outline = _fallback_outline(topic=request.topic, analysis_report=analysis_report)
+        # 中文说明：模型偶尔会无视用户明确写出的“共六节”，额外安排综合小节。
+        # 在进入逐节写作前按原有顺序执行这个数量上限，避免为已越界的大纲付费写作；
+        # 被删节数同时写进产物，不能悄悄把裁剪后的大纲称为模型完全遵守要求。
+        section_limit = _requested_section_limit(request)
+        outline, removed_sections = _trim_outline_sections(outline, section_limit)
 
         report = {
             "outline_version": WRITING_OUTLINE_VERSION,
@@ -69,7 +75,10 @@ def run_writing_outline_node():
                 "used_llm": used_llm,
                 "model_used": llm.model if isinstance(llm, ProviderSnapshot) else "unavailable",
                 "created_at": utc_now(),
-                "message": "已使用模型生成写作大纲" if used_llm else reason,
+                "message": ("已使用模型生成写作大纲" if used_llm else reason)
+                           + (f"；按用户小节数量上限移除 {removed_sections} 节" if removed_sections else ""),
+                "section_limit": section_limit,
+                "removed_sections": removed_sections,
             },
         }
 
@@ -147,6 +156,47 @@ def _outline_is_complete(outline: JsonObject | None) -> bool:
                 if key not in section:
                     return False
     return True
+
+
+def _requested_section_limit(request: Any) -> int | None:
+    """只识别用户明确给出的总节数上限，不猜“每篇一节”等隐含数量。"""
+
+    configured = (getattr(request, "constraints", None) or {}).get("max_sections")
+    if configured is not None:
+        try:
+            value = int(configured)
+            return value if value > 0 else None
+        except (TypeError, ValueError):
+            return None
+    topic = str(getattr(request, "topic", "") or "")
+    match = re.search(r"(?:共|总共|总计|最多)\s*([1-9]\d?|[一二三四五六七八九十])\s*(?:个)?(?:小节|节)", topic)
+    if not match:
+        return None
+    numerals = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+                "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    value = numerals.get(match.group(1)) or int(match.group(1))
+    return value
+
+
+def _trim_outline_sections(outline: JsonObject, limit: int | None) -> tuple[JsonObject, int]:
+    """保留大纲顺序中不超过用户上限的小节，并记录实际去掉的数量。"""
+
+    if limit is None:
+        return outline, 0
+    kept: JsonObject = {}
+    count = 0
+    removed = 0
+    for chapter_key, chapter in outline.items():
+        sections: JsonObject = {}
+        for section_key, section in (chapter.get("Sections") or {}).items():
+            if count >= limit:
+                removed += 1
+                continue
+            sections[section_key] = section
+            count += 1
+        if sections:
+            kept[chapter_key] = {**chapter, "Sections": sections}
+    return kept, removed
 
 
 def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
