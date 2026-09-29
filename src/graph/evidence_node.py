@@ -286,11 +286,18 @@ async def run_audit_node(state: State) -> State:
     reads = list(state.get("read_results") or []) + await asyncio.to_thread(_load_session_read_results, state)
     chunks = await asyncio.to_thread(load_scoped_chunks, Path(SystemConfig.load().read.paper_cache_dir), reads)
     aliases = {}
+    source_hints = {}
     for result in reads:
         paper = result.get("paper") or {}
         canonical = str(paper.get("paperId") or paper.get("id") or "").casefold()
         for alias in paper_scope([result]):
             aliases[alias.casefold()] = canonical
+        # 中文说明：这里只取阅读阶段的英文方法说明作检索词，帮助独立审计
+        # 在同篇原文中优先找到机制定义。审计模型实际看到的仍是原文切片；
+        # 即便这份说明写错，也不能靠它直接判定正文得到支持。
+        extraction = result.get("extraction") or {}
+        if canonical and isinstance(extraction, dict) and str(extraction.get("methods") or "").strip():
+            source_hints[canonical] = str(extraction["methods"])
     writing = dict(state.get("writing_report") or {})
     sections = list(writing.get("sections") or state.get("writing_sections") or [])
     reports = []
@@ -310,11 +317,13 @@ async def run_audit_node(state: State) -> State:
                 continue
             if (section.get("review") or {}).get("passed") is False:
                 review_errors.append(section_id)
-            reports.append(await agent.audit(section, chunks, aliases, writing.get("references") or []))
+            reports.append(await agent.audit(section, chunks, aliases, writing.get("references") or [],
+                                             source_hints=source_hints))
         # 摘要不能因为没有正式引用标记而跳过事实核查。
         _check_cancel(state)
         reports.append(await agent.audit({"section_id": "abstract", "content": writing.get("abstract") or ""},
-                                        chunks, aliases, writing.get("references") or [], abstract=True))
+                                        chunks, aliases, writing.get("references") or [], abstract=True,
+                                        source_hints=source_hints))
     finally:
         if owned and llm:
             await llm.aclose()

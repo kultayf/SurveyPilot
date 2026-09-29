@@ -36,7 +36,7 @@ class CitationAuditAgent(BaseAgent):
         raise NotImplementedError("请使用 audit 异步核查正文")
 
     async def audit(self, section: dict, chunks: list[TextChunk], aliases: dict[str, str], references: list[dict],
-                    *, abstract: bool = False) -> dict:
+                    *, abstract: bool = False, source_hints: dict[str, str] | None = None) -> dict:
         """先验证引用归属，再要求模型判断每段的所有事实；任何漏项都不算通过。"""
         content = str(section.get("content") or "") if abstract else str(section.get("source_content") or section.get("content") or "")
         units = audit_units(content)
@@ -95,14 +95,21 @@ class CitationAuditAgent(BaseAgent):
             bound_ids = [str(c.get("chunkId") or "") for binding in evidence
                          if str(binding.get("claim") or "") and (str(binding["claim"]) in unit or unit in str(binding["claim"]))
                          for c in binding.get("chunks") or []]
-            # 中文说明：跨论文总结句常引用五篇论文。全局排序可能只挑到其中
-            # 一两篇，所以每个实际被引用的论文至少尝试给出一条本篇候选；
-            # 这只扩大可核查范围，不等于这些片段已经支持正文。
-            per_paper_ids = [match[0][0]
-                             for paper_id in sorted(source_ids)
-                             if (match := bm25_rank(unit, [chunk for chunk in allowed
-                                                           if canonical(chunk.paperId) == paper_id], 1))]
-            candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + [chunk_id for chunk_id, _ in ranked]))
+            # 中文说明：中文综述对英文原文做关键词排序时，容易把表格或章节标题
+            # 排在真正的方法定义前面。阅读阶段提取的英文方法说明只作为检索词，
+            # 用它从同一篇已索引原文里找候选；说明本身绝不交给核查模型充当证据。
+            # 跨论文段落仍先给每篇一个位置，随后保留写作时的切片绑定和其他候选。
+            per_paper_ids = []
+            secondary_ids = []
+            for paper_id in sorted(source_ids):
+                paper_chunks = [chunk for chunk in allowed if canonical(chunk.paperId) == paper_id]
+                hint = str((source_hints or {}).get(paper_id) or "").strip()
+                matches = bm25_rank(hint or unit, paper_chunks, 2 if hint else 1)
+                if matches:
+                    per_paper_ids.append(matches[0][0])
+                    secondary_ids.extend(chunk_id for chunk_id, _ in matches[1:])
+            candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + secondary_ids
+                                               + [chunk_id for chunk_id, _ in ranked]))
             allowed_chunk_ids = {c.chunk_id for c in allowed}
             candidates = {chunk_id: by_id[chunk_id] for chunk_id in candidate_ids if chunk_id in allowed_chunk_ids}
             candidates = dict(list(candidates.items())[:candidate_limit])
