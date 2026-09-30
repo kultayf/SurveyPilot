@@ -25,7 +25,7 @@ WritingAction = Literal["tool", "draft"]
 # 中文说明：一次长综述会写很多小节。每节给出明确上限，避免模型反复检索、重写，
 # 把同一批长证据重复发送几十次；达到上限时保留失败标记，不能冒充核查通过。
 SECTION_TOKEN_BUDGET = 50000
-SECTION_TIME_BUDGET_SECONDS = 360
+SECTION_TIME_BUDGET_SECONDS = 480
 WRITE_CALL_TIMEOUT_SECONDS = 120
 
 
@@ -1114,7 +1114,7 @@ def _abstract_messages(*, topic: str, sections: list[JsonObject], word_count: in
         # 明确传递任务语言，避免摘要跟随英文论文或旧章节的语言。
         {"用户主题": topic, "输出语言": language, "语言要求": "摘要使用输出语言，保留必要的专有名词。",
          "摘要建议字数": max(100, int(word_count or 300)),
-         "用户本次摘要修订要求": instruction[:2000], "已完成正文": body},
+         "用户本次摘要修订要求": instruction[:4000], "已完成正文": body},
         ensure_ascii=False,
         indent=2,
     )

@@ -279,12 +279,27 @@ def run_writing_node():
                 reporter.progress("摘要模型调用完成", stage="writing_abstract", **usage)
 
         requested_length = re.search(r"(\d{2,4})\s*字", str(state.get("writing_instruction") or ""))
+        abstract_instruction = str(state.get("writing_instruction") or "") if "abstract" in target_ids else ""
+        if state.get("audit_revision"):
+            # 中文说明：旧版只把独立审计的失败理由交给正文小节，摘要每次都在
+            # 不知道自己哪里错的情况下重写，常再次把“不作排名”说成论文结论。
+            # 这里只带上摘要确实失败的句子与原因，不把审计模型的判词当证据。
+            failed_abstract = [
+                {"claim": str(unit.get("claim") or "")[:180],
+                 "reason": str(unit.get("reason") or "")[:260]}
+                for audit_section in (state.get("citation_audit") or {}).get("sections", [])
+                if audit_section.get("section_id") == "abstract"
+                for unit in audit_section.get("units", [])
+                if unit.get("status") not in {"supported", "not_required"}
+            ]
+            if failed_abstract:
+                abstract_instruction += "\n上轮摘要独立核查未通过；请删除或收窄以下具体句子，不能凭前文或常识保留原结论：" + json.dumps(failed_abstract[:8], ensure_ascii=False)
         abstract, abstract_status = await agent.async_write_abstract(
             topic=request.topic,
             sections=written_sections,
             language=request.language,
             word_count=int(requested_length.group(1)) if requested_length else 300,
-            instruction=str(state.get("writing_instruction") or "") if "abstract" in target_ids else "",
+            instruction=abstract_instruction,
             usage_callback=report_abstract_usage,
         )
 
