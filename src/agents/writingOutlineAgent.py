@@ -157,11 +157,16 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
             # 原论文可能是英文，章节标题仍须遵循用户选择的输出语言。
             "输出语言": getattr(request, "language", "zh"),
             "语言要求": "章节标题、小节标题、描述和任务说明均使用输出语言；保留必要的专有名词。",
-            "任务": "根据 overall_framework 生成章节和小节级别的写作大纲",
+            "任务": "根据 overall_framework 生成章节和小节级别的写作大纲"
+                  + ("；必须修正下列结构问题，并严格保留用户要求的逐篇小节和比较小节"
+                     if state.get("outline_structure_feedback") else ""),
             "overall_framework": overall_framework,
             "综合分析节点输出": overall_analysis,
             "可使用的子主题分析": subtopic_analyses,
             "已成功解析全文的论文": indexed_sources,
+            # 中文说明：只有第一次大纲没有遵守用户明确的逐篇/比较节结构时，
+            # 节点才填写这条补写说明；它是结构缺口，不是新的论文事实来源。
+            "本次大纲补写须修正的问题": str(state.get("outline_structure_feedback") or ""),
             "证据边界": "只有上述原始研究的可定位原文可支持具体架构、实验和数字；综合分析、子主题归纳及二手综述不能证明其中任何具体判断。大纲只能安排待核问题，不能照抄归纳里的方法痛点或研究空白。用户明确禁止的内容不能借定性比较重新加入。用户点名但不在原始研究名单中的模型，只能写缺乏原文、无法比较，不能安排其机制或性能事实任务。",
             "输出示例": {
                 "Chapter1": {

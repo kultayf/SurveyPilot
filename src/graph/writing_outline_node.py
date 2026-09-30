@@ -60,6 +60,26 @@ def run_writing_outline_node():
         used_llm = outline is not None and reason == "ok"
         if outline is None:
             outline = _fallback_outline(topic=request.topic, analysis_report=analysis_report)
+        # 中文说明：用户明确要求“每篇单独一节，再用一节比较”时，仅检查总节数
+        # 会漏掉某篇被拆成两节、比较节消失的情况。第 26 轮正是六节数量正确，
+        # 但 GraphSAGE 占两节且没有五篇比较。先把具体缺口告诉同一模型补写
+        # 一次大纲；若仍不符合，就停在写作前，避免为注定不合题的正文付费。
+        structure_issue = _explicit_named_paper_outline_problem(outline, request)
+        if structure_issue:
+            retry_state = dict(state)
+            retry_state["outline_structure_feedback"] = structure_issue
+            retry_outline, retry_raw, retry_reason = await _generate_outline(
+                cast(State, retry_state), agent=agent, usage_callback=report_outline_usage,
+            )
+            raw_model_output += "\n--- 按用户明确结构补写大纲 ---\n" + retry_raw
+            if retry_outline is None:
+                raise ValueError(f"大纲未满足用户明确结构，补写失败：{structure_issue}；{retry_reason}")
+            retry_issue = _explicit_named_paper_outline_problem(retry_outline, request)
+            if retry_issue:
+                raise ValueError(f"大纲补写后仍未满足用户明确结构：{retry_issue}")
+            outline = retry_outline
+            used_llm = True
+            reason = "ok"
         # 中文说明：模型偶尔会无视用户明确写出的“共六节”，额外安排综合小节。
         # 在进入逐节写作前按原有顺序执行这个数量上限，避免为已越界的大纲付费写作；
         # 被删节数同时写进产物，不能悄悄把裁剪后的大纲称为模型完全遵守要求。
@@ -156,6 +176,33 @@ def _outline_is_complete(outline: JsonObject | None) -> bool:
                 if key not in section:
                     return False
     return True
+
+
+def _explicit_named_paper_outline_problem(outline: JsonObject, request: Any) -> str:
+    """只核对用户同时写明的逐篇小节与比较节，不推测普通主题的隐含结构。"""
+
+    topic = str(getattr(request, "topic", "") or "")
+    paper_ids = list(dict.fromkeys(re.findall(r"arxiv\s*:\s*(\d{4}\.\d{4,5})", topic, re.IGNORECASE)))
+    limit = _requested_section_limit(request)
+    if not ("单论文" in topic and "比较小节" in topic and limit == len(paper_ids) + 1 and len(paper_ids) >= 2):
+        return ""
+    sections = [section for chapter in outline.values() if isinstance(chapter, dict)
+                for section in (chapter.get("Sections") or {}).values() if isinstance(section, dict)]
+    comparison = [section for section in sections
+                  if re.search(r"比较|对比|综合|差异|对照", str(section.get("title") or ""))]
+    singles = [section for section in sections if section not in comparison]
+    counts = {paper_id: 0 for paper_id in paper_ids}
+    for section in singles:
+        task = str(section.get("task") or "")
+        mentions = {paper_id for paper_id in paper_ids
+                    if re.search(r"arxiv\s*:\s*" + re.escape(paper_id) + r"\b", task, re.IGNORECASE)}
+        if len(mentions) != 1:
+            return "单论文小节的任务必须明确且只指定一篇用户点名的 arXiv 原论文"
+        counts[next(iter(mentions))] += 1
+    if len(sections) != limit or len(comparison) != 1 or any(count != 1 for count in counts.values()):
+        return (f"用户要求共 {limit} 节：{len(paper_ids)} 篇原论文各占一节，另有一节定性比较；"
+                f"现有 {len(sections)} 节、比较节 {len(comparison)} 节、逐篇次数 {counts}")
+    return ""
 
 
 def _requested_section_limit(request: Any) -> int | None:
