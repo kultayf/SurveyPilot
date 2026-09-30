@@ -427,8 +427,12 @@ class WritingAgent(BaseAgent):
             # 真实终审均查出“未提供表格/数字”“唯一有指标”等错误断言。写作端
             # 无法自动证明全文不存在某事，所以遇到这种句子就要求删除或改写成
             # 已有原文明确支持的正面事实，不能靠附一个论文编号直接放行。
-            if (re.search(r"(?:未提供|未报告|未列出|未见|缺少|缺失|没有).{0,100}"
+            # 中文说明：“未见节点”“未见过的数据”是 GraphSAGE 的归纳任务，
+            # 不是在断言原论文缺少数据。只把明确说论文没有报告某项材料的
+            # 短语拦下；“未见”必须紧跟被声称缺少的材料名，不能隔着整句找。
+            if (re.search(r"(?:未提供|未报告|未列出|缺少|缺失|没有).{0,40}"
                           r"(?:数据|指标|数值|结果|表格|曲线|证据|实验|模型|参数|计算量)", sentence)
+                    or re.search(r"未见(?:相关|明确|足够)?(?:数据|指标|数值|结果|表格|曲线|证据|实验|模型|参数|计算量)", sentence)
                     or re.search(r"唯一.{0,50}(?:证据|指标|结果|实验)", sentence)):
                 problems.append(f"事实句“{sentence[:50]}”断言论文缺少证据或仅某篇有证据；请删除该断言，仅写已逐项核实的结果。")
             # 中文说明：真实 GCN 任务把推导中的单个标量写成最终网络只有一个
@@ -1143,10 +1147,15 @@ def _review_messages(state: SectionLoopState) -> list[JsonObject]:
 
     # 中文说明：审查范围保持窄而明确，避免模型把审查变成重新设计全文。
     system_prompt = WRITING_REVIEW_SYSTEM_PROMPT
+    # 中文说明：自动修订时 task 后面会附上旧版审计失败句和旧正文，供写作模型
+    # 修改。文风审查若也看到它们，常把“上一版引用无效”误当成当前草稿仍无效；
+    # 引用位置已有程序单独检查，这里只保留用户范围与本节标题等原始要求。
+    review_task = str(state.get("task") or "").split("\n独立核查要求：", 1)[0]
+    review_task = review_task.split("\n上一版正文（仅作为修订草稿", 1)[0]
     user_prompt = json.dumps(
         {
             "section_id": state.get("section_id"),
-            "小节任务": state.get("task"),
+            "小节任务": review_task,
             "计划字数": state.get("word_count"),
             "正文草稿": state.get("draft") or "",
         },
