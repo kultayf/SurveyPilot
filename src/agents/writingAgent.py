@@ -24,7 +24,10 @@ WritingAction = Literal["tool", "draft"]
 
 # 中文说明：一次长综述会写很多小节。每节给出明确上限，避免模型反复检索、重写，
 # 把同一批长证据重复发送几十次；达到上限时保留失败标记，不能冒充核查通过。
-SECTION_TOKEN_BUDGET = 50000
+# 中文说明：第 25 轮 GCN、GIN 修订节在约 5 万 token 时已有正文，却因
+# 预算先耗尽而跳过文风审查；实际耗时远低于 480 秒。留出审查余量，
+# 同时继续保持每节有界，超过上限仍明确标为未核查。
+SECTION_TOKEN_BUDGET = 70000
 SECTION_TIME_BUDGET_SECONDS = 480
 WRITE_CALL_TIMEOUT_SECONDS = 120
 # 中文说明：兼容节点的输出额度同时覆盖内部推理。第 23 轮 GCN 首稿
@@ -1100,6 +1103,29 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
             })
         return json.dumps({"tool": "get_extraction", "papers": records,
                            "note": "切片编号只是核对入口；摘要或笔记不足以证明正文主张。"}, ensure_ascii=False)
+    if item.get("tool") == "search_section" and isinstance(item.get("result"), list):
+        # 中文说明：按编号取原文的返回值按论文分组，是列表而非混合检索的
+        # chunks 字典。过去直接截整块 JSON 到 6000 字，比较节后几篇论文
+        # 完全不可见，作者容易把前一篇的实验切片错绑到方法事实。每篇保留
+        # 至多两条带章节和页码的原文，并给单条设长度上限；仅压缩提示词，
+        # 不修改本地原始工具结果或放宽最终逐句证据审计。
+        papers: list[JsonObject] = []
+        for record in item["result"][:8]:
+            if not isinstance(record, dict):
+                continue
+            snippets = []
+            for chunk in (record.get("chunks") or [])[:2]:
+                if not isinstance(chunk, dict):
+                    continue
+                snippets.append({"chunkId": chunk.get("chunkId"),
+                                 "section": chunk.get("section"),
+                                 "page_start": chunk.get("page_start"),
+                                 "page_end": chunk.get("page_end"),
+                                 "content": str(chunk.get("content") or "")[:750]})
+            papers.append({"paperId": record.get("paperId"), "status": record.get("status"),
+                           "chunks": snippets})
+        return json.dumps({"tool": "search_section", "papers": papers,
+                           "note": "各篇原文只是候选证据；逐句核对事实与切片是否对应。"}, ensure_ascii=False)
     # 中文说明：检索结果中的 parent_content 往往比当前切片还长。过去直接把整个
     # 工具结果截到 6000 字，第一条的父级上下文就占满了空间，后面论文的 chunkId
     # 被截掉。原始工具结果仍完整留在状态和产物中；这里只整理模型下一轮确实要看的
