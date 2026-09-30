@@ -193,8 +193,9 @@ def run_writing_node():
                 # 中文说明：“不同任务不直接排名”是整篇综述的写作边界，不是每篇
                 # 原论文自己做出的结论。单论文节只讲指定机制；比较节也不能把
                 # 作者的写作选择伪装成有原文引用的科研发现。
-                if "比较" in str(section_task.get("section_title") or ""):
-                    task_text += "\n本节只比较用户指定的机制。若需交代跨任务限制，只写‘本文不作跨任务性能数值比较’，不要声称原论文证明这些任务绝对不可比较，也不要为此添写数据集清单。"
+                comparison_title = str(section_task.get("section_title") or "")
+                if any(word in comparison_title for word in ("比较", "对比", "综合", "差异", "对照")):
+                    task_text += "\n本节只比较用户指定机制的设计方式，不把标题里的‘适用边界’扩展成原论文局限清单。不得添写用户未要求的内存、硬件、边特征、有向图、网络深度、复杂度或应用场景。若需交代跨任务限制，只写‘本文不作跨任务性能数值比较’，不要声称原论文证明这些任务绝对不可比较，也不要为此添写数据集清单。"
                 else:
                     task_text += "\n本单论文小节只解释标题指定的机制；不写实验数据集、每层实验参数、其他理论或跨任务比较警示。整篇综述的比较范围留给综合小节。"
             # 每次写作与审稿都读取小节任务，因此这里同时约束初稿和后续重写的语言。
@@ -310,10 +311,36 @@ def run_writing_node():
                 if unit.get("status") not in {"supported", "not_required"}
             ]
             if failed_abstract:
-                abstract_instruction += "\n上轮摘要独立核查未通过；请删除或收窄以下具体句子，不能凭前文或常识保留原结论：" + json.dumps(failed_abstract[:8], ensure_ascii=False)
+                if not brief_mechanism:
+                    # 中文说明：简明任务会在下方改用已支持原句作摘要输入。
+                    # 此时不再转发上轮失败句，以免模型照搬无证据局限。
+                    abstract_instruction += "\n上轮摘要独立核查未通过；请删除或收窄以下具体句子，不能凭前文或常识保留原结论：" + json.dumps(failed_abstract[:8], ensure_ascii=False)
+        abstract_sections = written_sections
+        if brief_mechanism and state.get("audit_revision"):
+            # 中文说明：第十八轮摘要修订虽看到失败理由，仍照搬上一版未经证实的
+            # 五篇局限。修订摘要只能阅读“上一轮独立审计支持、且本轮正文仍原样
+            # 保留”的事实句；改写过或审计未过的句子不能借旧版正文混进摘要。
+            supported_by_section = {
+                str(section.get("section_id") or ""): [
+                    str(unit.get("claim") or "") for unit in section.get("units") or []
+                    if unit.get("status") == "supported" and str(unit.get("claim") or "").strip()
+                ]
+                for section in (state.get("citation_audit") or {}).get("sections", [])
+            }
+            abstract_sections = [
+                {**section, "content": " ".join(
+                    claim for claim in supported_by_section.get(str(section.get("section_id") or ""), [])
+                    if claim in str(section.get("source_content") or section.get("content") or "")
+                )}
+                for section in written_sections
+            ]
+            # 中文说明：没有原样保留的已支持句，不等于该论文没有原文。
+            # 模型仍可从用户主题得知综述覆盖了哪些方法，但不能因此补写
+            # 这轮尚未核查的新事实，也不能把内部取证状态写进摘要。
+            abstract_instruction += "\n上轮摘要有证据不足的事实句，不得沿用。只根据下方正文写；其他方法仅列为本文覆盖范围，不介绍细节。摘要不要评论证据状态。"
         abstract, abstract_status = await agent.async_write_abstract(
             topic=request.topic,
-            sections=written_sections,
+            sections=abstract_sections,
             language=request.language,
             # 中文说明：简明综述若没有用户指定摘要字数，短摘要即可说明范围；
             # 旧的 300 字目标迫使模型逐篇扩写未充分取证的技术细节。
