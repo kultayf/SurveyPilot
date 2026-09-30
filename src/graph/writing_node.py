@@ -63,6 +63,7 @@ def run_writing_node():
         # 指定每节字数时，把大纲字数当上限收紧；若用户明确给出字数，则尊重用户。
         topic_text = str(request.topic or "")
         brief_mechanism = "简明" in topic_text and "只讨论" in topic_text
+        named_arxiv_ids = list(dict.fromkeys(re.findall(r"arXiv\s*:\s*(\d{4}\.\d{4,5})", topic_text, re.IGNORECASE)))
         explicit_section_length = re.search(r"(?:每节|每小节|每段)\s*(?:约|不超过|至少)?\s*\d{2,4}\s*字", topic_text)
         if brief_mechanism and not explicit_section_length:
             for section_task in section_tasks:
@@ -189,13 +190,19 @@ def run_writing_node():
             task_text = ("用户原始要求（唯一内容边界）：" + str(request.topic or "")[:1600]
                          + "\n当前小节标题：" + str(section_task.get("section_title") or section_task["section_id"]))
             task_text += "\n写作范围：只回答用户要求中与本小节标题对应的问题。大纲任务细节和前文均未通过原文核查，不得补入未要求的方法痛点、效率、硬件或研究空白。每句论文事实先查原文，证据不支持就删去；已索引原文是否缺少某数字须检查实验章节、表格与附录，未查全不得断言不存在。"
+            comparison_title = str(section_task.get("section_title") or "")
+            is_comparison = any(word in comparison_title for word in ("比较", "对比", "综合", "差异", "对照"))
             if brief_mechanism:
                 # 中文说明：“不同任务不直接排名”是整篇综述的写作边界，不是每篇
                 # 原论文自己做出的结论。单论文节只讲指定机制；比较节也不能把
                 # 作者的写作选择伪装成有原文引用的科研发现。
-                comparison_title = str(section_task.get("section_title") or "")
-                if any(word in comparison_title for word in ("比较", "对比", "综合", "差异", "对照")):
+                if is_comparison:
                     task_text += "\n本节只比较用户指定机制的设计方式，不把标题里的‘适用边界’扩展成原论文局限清单。不得添写用户未要求的内存、硬件、边特征、有向图、网络深度、复杂度或应用场景。若需交代跨任务限制，只写‘本文不作跨任务性能数值比较’，不要声称原论文证明这些任务绝对不可比较，也不要为此添写数据集清单。"
+                    if named_arxiv_ids:
+                        # 中文说明：第十九轮综合节只写了五篇中的前三篇，虽有
+                        # 正文却没有回答用户要求。明确点名的原论文必须逐篇覆盖；
+                        # 每篇只需一句已核实的机制差异，不靠扩写局限凑字数。
+                        task_text += "\n必须覆盖用户点名的每篇原论文，每篇只写一句受原文支持的机制差异，不能漏掉末尾论文：" + "、".join(named_arxiv_ids)
                 else:
                     task_text += "\n本单论文小节只解释标题指定的机制；不写实验数据集、每层实验参数、其他理论或跨任务比较警示。整篇综述的比较范围留给综合小节。"
             # 每次写作与审稿都读取小节任务，因此这里同时约束初稿和后续重写的语言。
@@ -233,6 +240,10 @@ def run_writing_node():
                 session_read_results=session_read_results,
                 available_paper_ids=available_paper_ids,
                 progress_callback=report_section_phase,
+                # 中文说明：五篇论文的比较节在五万 Token 内常耗尽预算，
+                # 导致最后两篇没有正文。仅这种明确多论文的简明比较节提高
+                # 有界上限，普通单论文节不增加用量。
+                token_budget=80000 if brief_mechanism and is_comparison and len(named_arxiv_ids) >= 4 else None,
             )
             new_content = str(section_result.get("content") or "").strip()
             old_content = str((prior or {}).get("source_content") or (prior or {}).get("content") or "").strip()
@@ -262,6 +273,24 @@ def run_writing_node():
                 chapter_description=section_task.get("chapter_description") or "",
                 ref_sections=list(section_task.get("ref_sections") or []),
             )
+            if brief_mechanism and is_comparison and named_arxiv_ids:
+                # 中文说明：引用审计只判断“写出的句子”是否有证据，不知道用户
+                # 明确要求的五篇是否都被写到。这里只检查覆盖，不替模型补论文
+                # 事实；缺少任一指定论文就保持待核查，并在修订时指出编号。
+                body = str(section_result.get("source_content") or section_result.get("content") or "")
+                missing_ids = [paper_id for paper_id in named_arxiv_ids if f"[{paper_id}]" not in body]
+                if missing_ids:
+                    old_review = dict(section_result.get("review") or {})
+                    message = "综合节未覆盖用户指定原论文：" + "、".join(missing_ids)
+                    if old_review.get("message"):
+                        message += "；原检查：" + str(old_review["message"])
+                    section_result["review"] = {
+                        **old_review,
+                        "passed": False,
+                        "suggestions": [*list(old_review.get("suggestions") or []), message],
+                        "message": message,
+                    }
+                    section_result["warnings"] = [*list(section_result.get("warnings") or []), message]
             written_sections.append(section_result)
             await save_checkpoint({**state, "writing_partial_sections": written_sections}, "run_writing")
             if reporter is not None:

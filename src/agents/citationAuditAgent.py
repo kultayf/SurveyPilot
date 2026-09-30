@@ -42,7 +42,8 @@ class CitationAuditAgent(BaseAgent):
         raise NotImplementedError("请使用 audit 异步核查正文")
 
     async def audit(self, section: dict, chunks: list[TextChunk], aliases: dict[str, str], references: list[dict],
-                    *, abstract: bool = False, source_hints: dict[str, str] | None = None) -> dict:
+                    *, abstract: bool = False, source_hints: dict[str, str] | None = None,
+                    abstract_paper_terms: dict[str, str] | None = None) -> dict:
         """先验证引用归属，再要求模型判断每段的所有事实；任何漏项都不算通过。"""
         content = str(section.get("content") or "") if abstract else str(section.get("source_content") or section.get("content") or "")
         units = audit_units(content)
@@ -93,6 +94,18 @@ class CitationAuditAgent(BaseAgent):
                 item.update(status="invalid_citation", reason="存在未知引用或原文归属错误")
             # 摘要允许由已用论文共同支撑；正文事实必须有实际引用，不能自动补证后假装原稿正确。
             allowed_ids = {paper_id for paper_id in ref_ids.values() if paper_id} if abstract else cited
+            if abstract and abstract_paper_terms:
+                # 中文说明：摘要某句若只点名两种方法，旧流程仍先塞进五篇论文
+                # 各一段“保底”原文，真正相关的细节常被八段上限挤掉。这里只按
+                # 正文单论文小节的标题缩小该句候选；未点名或无法可靠对应时仍
+                # 检查全部参考文献，不能因猜测方法归属而替事实审计放行。
+                mentioned = {
+                    canonical(paper_id) for term, paper_id in abstract_paper_terms.items()
+                    if re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", unit, re.IGNORECASE)
+                    and canonical(paper_id) in allowed_ids
+                }
+                if mentioned:
+                    allowed_ids = mentioned
             allowed = [c for c in chunks if canonical(c.paperId) in allowed_ids]
             # 中文说明：摘要不写论文编号，但会概括正文真正引用的多篇论文。
             # 若仍按“本段引用数为零”只取四段，五篇论文的摘要至多只看到四篇，
@@ -220,6 +233,33 @@ class CitationAuditAgent(BaseAgent):
                 "reasoning_length": len(str(response.reasoning_content or "")) if response is not None else 0,
             }
             return report
+        # 中文说明：第十九轮一条“本文不作跨任务排名”的句子被审计模型
+        # 漏掉，虽有其他句子的结果，整节仍保留 unverified。只对遗漏或
+        # 重复编号的原句补问一次，沿用同一严格规则和原文候选；补问失败
+        # 仍保留未验证，不凭常识自动判成通过。
+        returned_indices = [v.get("index") for v in verdicts if isinstance(v, dict)]
+        missing_indices = {index for index in candidate_maps if returned_indices.count(index) != 1}
+        if missing_indices:
+            retry_units = [item for item in payload if item["index"] in missing_indices]
+            retry_messages = [messages[0], {"role": "user", "content": json.dumps(
+                {"abstract": abstract, "units": retry_units,
+                 "note": "上一响应遗漏或重复了这些 index；只对这些原句按相同标准逐项判定。"},
+                ensure_ascii=False)}]
+            try:
+                retry = await asyncio.wait_for(
+                    self.context.llm.provider.chat(retry_messages, temperature=0, max_tokens=AUDIT_MAX_TOKENS),
+                    timeout=AUDIT_TIMEOUT_SECONDS,
+                )
+                self.report_usage(retry)
+                retry_parsed = _extract_json_object(str(retry.content)) if retry.ok else None
+                retry_verdicts = retry_parsed.get("verdicts") if isinstance(retry_parsed, dict) else None
+                if isinstance(retry_verdicts, list):
+                    verdicts = [v for v in verdicts if not isinstance(v, dict) or v.get("index") not in missing_indices]
+                    verdicts.extend(v for v in retry_verdicts if isinstance(v, dict) and v.get("index") in missing_indices)
+            except Exception:
+                # 中文说明：补问只是减少偶发遗漏，不是验收门禁；失败时
+                # 原本的 unverified 会原样保留。
+                pass
         indices = [v.get("index") for v in verdicts if isinstance(v, dict)]
         for verdict in verdicts:
             if not isinstance(verdict, dict):

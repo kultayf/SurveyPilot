@@ -63,6 +63,7 @@ class SectionLoopState(TypedDict, total=False):
     generation_failed: bool
     warnings: list[str]
     spent_tokens: int
+    token_budget: int
     started_at: float
     # 中文说明：这是一个可选的界面通知函数，只把当前小节正在做什么告诉外层，
     # 不参与正文生成，也不会改变循环里的数据。
@@ -119,6 +120,7 @@ class WritingAgent(BaseAgent):
         session_read_results: list[JsonObject] | None = None,
         available_paper_ids: list[str] | None = None,
         progress_callback: Any | None = None,
+        token_budget: int | None = None,
     ) -> JsonObject:
         """写作单个小节，并返回正文、引用和审查结果。
 
@@ -154,6 +156,9 @@ class WritingAgent(BaseAgent):
             "completed": False,
             "warnings": [],
             "spent_tokens": 0,
+            # 中文说明：多论文比较需核对多篇原文，可以由外层给出更高、但仍
+            # 明确有上限的预算；普通单论文小节继续沿用五万 Token 上限。
+            "token_budget": max(SECTION_TOKEN_BUDGET, int(token_budget or SECTION_TOKEN_BUDGET)),
             "started_at": time.monotonic(),
             "progress_callback": progress_callback,
         }
@@ -238,10 +243,25 @@ class WritingAgent(BaseAgent):
         if self.context.llm is None:
             return _stop_writing(state, "未配置可用的写作模型")
 
+        messages = _write_messages(state)
         try:
             response = await asyncio.wait_for(self.context.llm.provider.chat(
-                _write_messages(state), temperature=0.2, max_tokens=6144,
+                messages, temperature=0.2, max_tokens=6144,
             ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            # 中文说明：真实比较节偶发一次模型超时，旧流程立即保存为缺正文。
+            # 只在本节总时间预算仍允许时，对完全相同的任务与证据补问一次；
+            # 不把超时响应当正文，也不无限循环或偷偷追加来源。
+            if _section_budget_exhausted(state):
+                return _stop_writing(state, "写作模型超时且本小节预算已用尽")
+            _notify_section_progress(state, "写作模型超时，正在重试同一请求")
+            try:
+                response = await asyncio.wait_for(self.context.llm.provider.chat(
+                    messages, temperature=0, max_tokens=6144,
+                ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
+                state = {**state, "warnings": [*list(state.get("warnings") or []), "写作模型首次调用超时，已同输入重试"]}
+            except Exception as exc:
+                return _stop_writing(state, f"写作模型超时重试失败：{type(exc).__name__}")
         except Exception as exc:
             return _stop_writing(state, f"写作模型未按时完成：{type(exc).__name__}")
         state = _record_section_usage(state, response)
@@ -587,7 +607,7 @@ def _record_section_usage(state: SectionLoopState, response: object) -> SectionL
 def _section_budget_exhausted(state: SectionLoopState) -> bool:
     """超过本节用量或用时上限时，停止下一次付费模型调用。"""
 
-    return (int(state.get("spent_tokens") or 0) >= SECTION_TOKEN_BUDGET
+    return (int(state.get("spent_tokens") or 0) >= int(state.get("token_budget") or SECTION_TOKEN_BUDGET)
             or time.monotonic() - float(state.get("started_at") or time.monotonic()) >= SECTION_TIME_BUDGET_SECONDS)
 
 

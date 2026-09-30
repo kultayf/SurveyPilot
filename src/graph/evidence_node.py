@@ -300,6 +300,15 @@ async def run_audit_node(state: State) -> State:
             source_hints[canonical] = str(extraction["methods"])
     writing = dict(state.get("writing_report") or {})
     sections = list(writing.get("sections") or state.get("writing_sections") or [])
+    abstract_paper_terms = {}
+    for section in sections:
+        # 中文说明：摘要没有正式引文，但单论文小节标题常写明 GCN、GAT 等
+        # 方法名。只在该小节确实引用一篇论文时建立“方法名→论文”对应；
+        # 摘要句若明确点名这些方法，可少给无关论文的切片，不改变事实判断。
+        cited_ids = list(section.get("cited_paper_ids") or [])
+        title_match = re.match(r"\s*([A-Za-z][A-Za-z0-9-]{2,})", str(section.get("section_title") or ""))
+        if len(cited_ids) == 1 and title_match:
+            abstract_paper_terms[title_match.group(1).casefold()] = str(cited_ids[0])
     reports = []
     generation_errors = []
     review_errors = []
@@ -323,7 +332,7 @@ async def run_audit_node(state: State) -> State:
         _check_cancel(state)
         reports.append(await agent.audit({"section_id": "abstract", "content": writing.get("abstract") or ""},
                                         chunks, aliases, writing.get("references") or [], abstract=True,
-                                        source_hints=source_hints))
+                                        source_hints=source_hints, abstract_paper_terms=abstract_paper_terms))
     finally:
         if owned and llm:
             await llm.aclose()
