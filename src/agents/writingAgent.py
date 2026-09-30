@@ -27,6 +27,10 @@ WritingAction = Literal["tool", "draft"]
 SECTION_TOKEN_BUDGET = 50000
 SECTION_TIME_BUDGET_SECONDS = 480
 WRITE_CALL_TIMEOUT_SECONDS = 120
+# 中文说明：兼容节点的输出额度同时覆盖内部推理。第 23 轮 GCN 首稿
+# 两次返回无法解析的 JSON；多留一些额度给完整的正文和逐句证据列表，
+# 实际用量仍由供应商回执记录，并受每节总预算约束。
+WRITE_MAX_TOKENS = 8192
 
 
 class SectionLoopState(TypedDict, total=False):
@@ -246,7 +250,7 @@ class WritingAgent(BaseAgent):
         messages = _write_messages(state)
         try:
             response = await asyncio.wait_for(self.context.llm.provider.chat(
-                messages, temperature=0.2, max_tokens=6144,
+                messages, temperature=0.2, max_tokens=WRITE_MAX_TOKENS,
             ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             # 中文说明：真实比较节偶发一次模型超时，旧流程立即保存为缺正文。
@@ -257,7 +261,7 @@ class WritingAgent(BaseAgent):
             _notify_section_progress(state, "写作模型超时，正在重试同一请求")
             try:
                 response = await asyncio.wait_for(self.context.llm.provider.chat(
-                    messages, temperature=0, max_tokens=6144,
+                    messages, temperature=0, max_tokens=WRITE_MAX_TOKENS,
                 ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
                 state = {**state, "warnings": [*list(state.get("warnings") or []), "写作模型首次调用超时，已同输入重试"]}
             except Exception as exc:
@@ -286,7 +290,7 @@ class WritingAgent(BaseAgent):
                 return _stop_writing(state, "首次输出格式错误，且小节预算已用尽", raw_outputs)
             try:
                 retry = await asyncio.wait_for(self.context.llm.provider.chat(
-                    retry_messages, temperature=0, max_tokens=6144,
+                    retry_messages, temperature=0, max_tokens=WRITE_MAX_TOKENS,
                 ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
             except Exception as exc:
                 return _stop_writing(state, f"写作格式重试失败：{type(exc).__name__}", raw_outputs)
@@ -295,9 +299,6 @@ class WritingAgent(BaseAgent):
             raw_outputs.append(retry_output)
             if retry.ok:
                 parsed = _extract_json_object(retry_output)
-        if parsed is None and int(state.get("tool_call_count") or 0) < self.max_tool_calls:
-            return _stop_writing(state, "写作模型两次均未返回单个合法 JSON 对象", raw_outputs)
-
         action = str((parsed or {}).get("action") or "").strip().lower()
         if action == "tool" and int(state.get("tool_call_count") or 0) < self.max_tool_calls:
             return {
@@ -309,21 +310,23 @@ class WritingAgent(BaseAgent):
             }
 
         if (action != "draft" or not isinstance((parsed or {}).get("content"), str)
-                or not parsed["content"].strip()) and int(state.get("tool_call_count") or 0) >= self.max_tool_calls:
-            # 中文说明：资料工具已经用满时，模型偶尔还会要求查资料。只补问一次，
-            # 明确要求它基于现有证据写正文；仍没有正文就如实保留失败状态。
+                or not parsed["content"].strip()):
+            # 中文说明：工具用满或两次回复都不是合法 JSON 时，最多补问
+            # 一次现有资料下的正文。第 23 轮 GCN 尚剩工具次数却在两次
+            # 格式错误后直接缺正文；这次补问仍须返回有效原文绑定，
+            # 否则保留失败占位，绝不把自由文本冒充综述。
             if _section_budget_exhausted(state):
-                return _stop_writing(state, "资料工具已用满，且小节预算不足以补写正文", raw_outputs)
-            _notify_section_progress(state, "资料工具已用满，正在要求模型直接提交正文")
+                return _stop_writing(state, "输出格式或资料工具异常，且小节预算不足以补写正文", raw_outputs)
+            _notify_section_progress(state, "正在根据已有资料补问正文")
             try:
                 forced = await asyncio.wait_for(self.context.llm.provider.chat(
                     [*_write_messages(state), {
                         "role": "user",
-                        "content": "资料工具次数已经用满。现在禁止继续请求任何工具；请只根据已取得的资料返回 action=draft 的单个合法 JSON。证据不足的要点请明确说明边界，不要编造事实；content 必须是非空的本小节正文。",
-                    }], temperature=0, max_tokens=6144,
+                        "content": "现在请停止请求工具，只根据已经取得的资料返回 action=draft 的单个合法 JSON。证据不足的要点请删去或说明边界，不要编造事实；content 必须是非空的本小节正文，每句仍须有真实原文切片绑定。",
+                    }], temperature=0, max_tokens=WRITE_MAX_TOKENS,
                 ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
             except Exception as exc:
-                return _stop_writing(state, f"资料工具已用满，补写模型调用失败：{type(exc).__name__}", raw_outputs)
+                return _stop_writing(state, f"补问正文模型调用失败：{type(exc).__name__}", raw_outputs)
             state = _record_section_usage(state, forced)
             forced_output = str(getattr(forced, "content", "") or "")
             raw_outputs.append(forced_output)
@@ -332,7 +335,7 @@ class WritingAgent(BaseAgent):
 
         # 工具响应、空对象和其他协议内容不能作为论文正文交付。
         if action != "draft" or not isinstance((parsed or {}).get("content"), str) or not parsed["content"].strip():
-            reason = "资料工具已用满，补写后仍未返回有效正文" if int(state.get("tool_call_count") or 0) >= self.max_tool_calls else "模型未返回有效正文"
+            reason = "有界补问后仍未返回有效正文"
             return _stop_writing(state, reason, raw_outputs)
         draft = parsed["content"].strip()
         paper_ids = _deduplicate_strings(
