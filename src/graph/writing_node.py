@@ -58,6 +58,15 @@ def run_writing_node():
             session_read_results=session_read_results,
         )
         section_tasks = _flatten_outline(outline)
+        # 中文说明：模型大纲虽收到“简明、单一机制”的要求，本轮仍把每节写成
+        # 350 到 400 字，作者为填篇幅加入了实验数据集与具体采样配置。用户没有
+        # 指定每节字数时，把大纲字数当上限收紧；若用户明确给出字数，则尊重用户。
+        topic_text = str(request.topic or "")
+        brief_mechanism = "简明" in topic_text and "只讨论" in topic_text
+        explicit_section_length = re.search(r"(?:每节|每小节|每段)\s*(?:约|不超过|至少)?\s*\d{2,4}\s*字", topic_text)
+        if brief_mechanism and not explicit_section_length:
+            for section_task in section_tasks:
+                section_task["word_count"] = min(int(section_task["word_count"]), 240)
         written_sections: list[JsonObject] = []
         target_ids = {str(value) for value in (state.get("writing_target_ids") or [])}
         partial_sections = {
@@ -180,6 +189,14 @@ def run_writing_node():
             task_text = ("用户原始要求（唯一内容边界）：" + str(request.topic or "")[:1600]
                          + "\n当前小节标题：" + str(section_task.get("section_title") or section_task["section_id"]))
             task_text += "\n写作范围：只回答用户要求中与本小节标题对应的问题。大纲任务细节和前文均未通过原文核查，不得补入未要求的方法痛点、效率、硬件或研究空白。每句论文事实先查原文，证据不支持就删去；已索引原文是否缺少某数字须检查实验章节、表格与附录，未查全不得断言不存在。"
+            if brief_mechanism:
+                # 中文说明：“不同任务不直接排名”是整篇综述的写作边界，不是每篇
+                # 原论文自己做出的结论。单论文节只讲指定机制；比较节也不能把
+                # 作者的写作选择伪装成有原文引用的科研发现。
+                if "比较" in str(section_task.get("section_title") or ""):
+                    task_text += "\n本节只比较用户指定的机制。若需交代跨任务限制，只写‘本文不作跨任务性能数值比较’，不要声称原论文证明这些任务绝对不可比较，也不要为此添写数据集清单。"
+                else:
+                    task_text += "\n本单论文小节只解释标题指定的机制；不写实验数据集、每层实验参数、其他理论或跨任务比较警示。整篇综述的比较范围留给综合小节。"
             # 每次写作与审稿都读取小节任务，因此这里同时约束初稿和后续重写的语言。
             task_text += f"\n输出语言：{request.language}。正文使用该语言，保留必要的专有名词与原文引句。"
             if state.get("audit_revision"):
@@ -298,7 +315,9 @@ def run_writing_node():
             topic=request.topic,
             sections=written_sections,
             language=request.language,
-            word_count=int(requested_length.group(1)) if requested_length else 300,
+            # 中文说明：简明综述若没有用户指定摘要字数，短摘要即可说明范围；
+            # 旧的 300 字目标迫使模型逐篇扩写未充分取证的技术细节。
+            word_count=int(requested_length.group(1)) if requested_length else (120 if brief_mechanism else 300),
             instruction=abstract_instruction,
             usage_callback=report_abstract_usage,
         )
