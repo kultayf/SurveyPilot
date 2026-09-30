@@ -502,7 +502,7 @@ class WritingAgent(BaseAgent):
 
         try:
             response = await asyncio.wait_for(self.context.llm.provider.chat(
-                _review_messages(state), temperature=0, max_tokens=2048,
+                _review_messages(state, located), temperature=0, max_tokens=2048,
             ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
         except Exception as exc:
             return _stop_writing(state, f"审查模型未按时完成：{type(exc).__name__}")
@@ -1162,8 +1162,8 @@ def _fallback_abstract(topic: str, sections: list[JsonObject]) -> str:
     return f"本文围绕“{topic}”梳理相关研究。" + "".join(summaries)
 
 
-def _review_messages(state: SectionLoopState) -> list[JsonObject]:
-    """构造审查提示词，只检查逻辑和语言。"""
+def _review_messages(state: SectionLoopState, located: JsonObject | None = None) -> list[JsonObject]:
+    """构造审查提示词，附上已绑定原文的短上下文以检查方法归属。"""
 
     # 中文说明：审查范围保持窄而明确，避免模型把审查变成重新设计全文。
     system_prompt = WRITING_REVIEW_SYSTEM_PROMPT
@@ -1172,12 +1172,33 @@ def _review_messages(state: SectionLoopState) -> list[JsonObject]:
     # 引用位置已有程序单独检查，这里只保留用户范围与本节标题等原始要求。
     review_task = str(state.get("task") or "").split("\n独立核查要求：", 1)[0]
     review_task = review_task.split("\n上一版正文（仅作为修订草稿", 1)[0]
+    source_excerpts: list[JsonObject] = []
+    for binding in (located or {}).get("citation_evidence") or []:
+        # 中文说明：第二十一轮 GAT 的切片从 LLE 句子中间开始，单看子片段
+        # 会把“别人的方法”误读成 GAT。带上父段中紧邻片段的前文，
+        # 让审查能识别是谁做了这个操作；长段和多处绑定都设定上限。
+        for chunk in binding.get("chunks") or []:
+            content = str(chunk.get("content") or "")
+            parent = str(chunk.get("parent_content") or "")
+            position = parent.find(content[:min(40, len(content))]) if content and parent else -1
+            before = parent[max(0, position - 420):position] if position >= 0 else ""
+            source_excerpts.append({
+                "claim": str(binding.get("claim") or "")[:220],
+                "chunkId": str(chunk.get("chunkId") or ""),
+                "原文前文": before,
+                "已绑定原文": content[:520],
+            })
+            if len(source_excerpts) >= 12:
+                break
+        if len(source_excerpts) >= 12:
+            break
     user_prompt = json.dumps(
         {
             "section_id": state.get("section_id"),
             "小节任务": review_task,
             "计划字数": state.get("word_count"),
             "正文草稿": state.get("draft") or "",
+            "已绑定原文与紧邻前文（仅供检查主语和方法归属；不是独立审计）": source_excerpts,
         },
         ensure_ascii=False,
         indent=2,
