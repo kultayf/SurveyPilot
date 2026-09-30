@@ -301,6 +301,18 @@ async def run_audit_node(state: State) -> State:
     writing = dict(state.get("writing_report") or {})
     sections = list(writing.get("sections") or state.get("writing_sections") or [])
     abstract_paper_terms = {}
+    # 中文说明：第 24 轮 APPNP 小节标题以中文“基于个性化…”开头，
+    # 旧规则未建立 APPNP→论文映射；摘要只点名 APPNP 时仍先塞五篇
+    # 各一段，幂迭代方法原文被挤掉。用户题目若明确写出
+    # “方法名（arXiv:编号）”，只用这组已在参考文献中的对应关系
+    # 缩小候选范围，真正的事实判断仍由独立模型读原文完成。
+    referenced_ids = {str(ref.get("paperId") or "").casefold() for ref in writing.get("references") or []}
+    topic = str(getattr(state.get("request"), "topic", "") or "")
+    for match in re.finditer(r"([A-Za-z][A-Za-z0-9-]{2,})\s*[（(]\s*arXiv\s*:\s*(\d{4}\.\d{4,5})\s*[）)]",
+                             topic, re.IGNORECASE):
+        paper_id = aliases.get(match.group(2).casefold(), "")
+        if paper_id and paper_id in referenced_ids:
+            abstract_paper_terms[match.group(1).casefold()] = paper_id
     for section in sections:
         # 中文说明：摘要没有正式引文，但单论文小节标题常写明 GCN、GAT 等
         # 方法名。只在该小节确实引用一篇论文时建立“方法名→论文”对应；
@@ -308,7 +320,7 @@ async def run_audit_node(state: State) -> State:
         cited_ids = list(section.get("cited_paper_ids") or [])
         title_match = re.match(r"\s*([A-Za-z][A-Za-z0-9-]{2,})", str(section.get("section_title") or ""))
         if len(cited_ids) == 1 and title_match:
-            abstract_paper_terms[title_match.group(1).casefold()] = str(cited_ids[0])
+            abstract_paper_terms.setdefault(title_match.group(1).casefold(), str(cited_ids[0]))
     reports = []
     generation_errors = []
     review_errors = []

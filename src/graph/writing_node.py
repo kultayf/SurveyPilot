@@ -232,7 +232,20 @@ def run_writing_node():
                         # 每篇只需一句已核实的机制差异，不靠扩写局限凑字数。
                         task_text += "\n必须覆盖用户点名的每篇原论文，每篇只写一句受原文支持的机制差异，不能漏掉末尾论文：" + "、".join(named_arxiv_ids)
                 else:
-                    task_text += "\n本单论文小节只解释标题指定的机制；不写实验数据集、每层实验参数、用户未点名的模型变体或理论例外、其他理论或跨任务比较警示。若原文谈的是相关工作而非本文方法，不得将其操作归给本文方法。整篇综述的比较范围留给综合小节。"
+                    # 中文说明：真实大纲多次把用户“GIN 只讨论求和聚合”
+                    # 扩成 WL 测试内部机制，把“GCN 一阶传播”扩成谱半径
+                    # 等公式细节。用户在主题里逐篇写明的“只讨论”范围
+                    # 比模型大纲标题更权威，单独提取给作者和本地审查。
+                    matched_ids = [paper_id for paper_id in named_arxiv_ids if paper_id in evidence_text]
+                    if len(matched_ids) == 1:
+                        scope_match = re.search(
+                            rf"[A-Za-z][A-Za-z0-9-]{{2,}}\s*[（(]\s*arXiv\s*:\s*{re.escape(matched_ids[0])}"
+                            rf"\s*[）)]\s*只讨论[^；;。]*",
+                            topic_text, re.IGNORECASE,
+                        )
+                        if scope_match:
+                            task_text += "\n本节用户明确限定（优先于大纲标题的扩写）：" + scope_match.group(0)
+                    task_text += "\n本单论文小节只解释用户明确限定的机制，大纲标题仅用于定位小节、不能扩大范围；不写实验数据集、每层实验参数、用户未点名的模型变体或理论例外、其他理论或跨任务比较警示。若原文谈的是相关工作而非本文方法，不得将其操作归给本文方法。整篇综述的比较范围留给综合小节。"
             # 每次写作与审稿都读取小节任务，因此这里同时约束初稿和后续重写的语言。
             task_text += f"\n输出语言：{request.language}。正文使用该语言，保留必要的专有名词与原文引句。"
             if state.get("audit_revision"):

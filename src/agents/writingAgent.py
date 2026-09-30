@@ -470,6 +470,8 @@ class WritingAgent(BaseAgent):
             # 方括号本身不能证明引用有效；逐个编号核对本句的真实证据，防止未知编号
             # 或其他句子的有效引用掩盖当前句缺少来源的问题。
             for marker in re.findall(r"\[([^\[\]\n]+)\]", sentence):
+                if _is_numeric_interval_marker(marker):
+                    continue
                 for paper_id in re.split(r"[,;，；]\s*", marker):
                     if not any(
                         str(binding.get("paperId") or "").casefold() == paper_id.strip().casefold()
@@ -789,8 +791,18 @@ def _text_cites_paper(text: str, paper_id: str) -> bool:
     return any(
         value.strip().casefold() == expected
         for marker in re.findall(r"\[([^\[\]\n]+)\]", str(text or ""))
+        if not _is_numeric_interval_marker(marker)
         for value in re.split(r"[,;，；]\s*", marker)
     )
+
+
+def _is_numeric_interval_marker(marker: str) -> bool:
+    """识别从零开始的数字区间，避免把公式中的 `[0, 2]` 当成论文引用。"""
+
+    # 中文说明：参考文献序号从 1 开始；“[0, 2]”是谱算子的
+    # 数值区间，不是第 0 与第 2 篇论文。只跳过这类明确从 0
+    # 开始的双端数字区间，其余未知方括号仍按无效引用拦截。
+    return bool(re.fullmatch(r"\s*0(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*", marker))
 
 
 def _build_chunk_to_paper_map(payloads: list[Any], *, cache_dir: Path) -> dict[str, str]:
@@ -1429,7 +1441,8 @@ def _paper_ids_from_any(value: Any) -> list[str]:
         for item in value:
             found.extend(_paper_ids_from_any(item))
     elif isinstance(value, str):
-        found.extend(_clean_paper_id_candidate(match) for match in re.findall(r"\[([^\[\]]+)\]", value) if match.strip())
+        found.extend(_clean_paper_id_candidate(match) for match in re.findall(r"\[([^\[\]]+)\]", value)
+                     if match.strip() and not _is_numeric_interval_marker(match))
     return _deduplicate_strings(found)
 
 
