@@ -367,16 +367,33 @@ def run_writing_node():
             # 模型仍可从用户主题得知综述覆盖了哪些方法，但不能因此补写
             # 这轮尚未核查的新事实，也不能把内部取证状态写进摘要。
             abstract_instruction += "\n上轮摘要有证据不足的事实句，不得沿用。只根据下方正文写；其他方法仅列为本文覆盖范围，不介绍细节。摘要不要评论证据状态。"
-        abstract, abstract_status = await agent.async_write_abstract(
-            topic=request.topic,
-            sections=abstract_sections,
-            language=request.language,
-            # 中文说明：简明综述若没有用户指定摘要字数，短摘要即可说明范围；
-            # 旧的 300 字目标迫使模型逐篇扩写未充分取证的技术细节。
-            word_count=int(requested_length.group(1)) if requested_length else (120 if brief_mechanism else 300),
-            instruction=abstract_instruction,
-            usage_callback=report_abstract_usage,
+        prior_writing = state.get("writing_report") or {}
+        prior_abstract_audit_passed = any(
+            section.get("section_id") == "abstract" and section.get("status") == "passed"
+            for section in (state.get("citation_audit") or {}).get("sections", [])
         )
+        reuse_abstract = (
+            bool(state.get("audit_revision")) and "abstract" not in target_ids
+            and prior_abstract_audit_passed
+            and bool(str(prior_writing.get("abstract") or "").strip())
+            and (prior_writing.get("execution_metadata") or {}).get("abstract_status") == "ok"
+        )
+        if reuse_abstract:
+            # 中文说明：修订只触及未通过的小节时，已由独立模型核查通过的摘要
+            # 不应无故重写出新事实。沿用原文仍会在最终审计中重新逐句核查，
+            # 不能把上一轮的通过标记直接当作最终通过。
+            abstract, abstract_status = str(prior_writing["abstract"]), "ok"
+        else:
+            abstract, abstract_status = await agent.async_write_abstract(
+                topic=request.topic,
+                sections=abstract_sections,
+                language=request.language,
+                # 中文说明：简明综述若没有用户指定摘要字数，短摘要即可说明范围；
+                # 旧的 300 字目标迫使模型逐篇扩写未充分取证的技术细节。
+                word_count=int(requested_length.group(1)) if requested_length else (120 if brief_mechanism else 300),
+                instruction=abstract_instruction,
+                usage_callback=report_abstract_usage,
+            )
 
         # 中文说明：引用顺序以正文里 paperId 第一次出现的位置为准，
         # 这样最后的参考文献编号和正文阅读顺序一致。
