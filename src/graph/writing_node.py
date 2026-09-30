@@ -184,6 +184,29 @@ def run_writing_node():
             ], ensure_ascii=False)
             if matrix_rows:
                 section_evidence.append({"field": "实证矩阵的原文位置（不是事实结论）", "content": matrix_excerpt})
+            # 中文说明：第 23 轮 GCN 已有方法章节的传播规则原文，但作者
+            # 只打开摘要和实验切片，最后偏写训练架构。阅读提取中保存的
+            # 方法切片编号只作为“去哪里查”的入口；正文仍必须用工具打开
+            # 原文，逐句绑定真实子片段，不能把提取说明当成事实证明。
+            selected_paper_ids = {str(row.get("paperId") or "").casefold() for row in selected_rows}
+            method_locations: list[JsonObject] = []
+            seen_method_papers: set[str] = set()
+            for result in [*read_results, *session_read_results]:
+                paper = result.get("paper") or {}
+                paper_id = str(paper.get("paperId") or paper.get("id") or "")
+                if not paper_id or paper_id.casefold() not in selected_paper_ids or paper_id.casefold() in seen_method_papers:
+                    continue
+                methods = str((result.get("extraction") or {}).get("methods") or "")
+                chunk_ids = list(dict.fromkeys(
+                    marker for marker in re.findall(r"\[([^\[\]\n]+)\]", methods)
+                    if marker.casefold().startswith(paper_id.casefold() + ":")
+                ))[:6]
+                if chunk_ids:
+                    method_locations.append({"paperId": paper_id, "chunkIds": chunk_ids})
+                    seen_method_papers.add(paper_id.casefold())
+            if method_locations:
+                section_evidence.append({"field": "阅读阶段定位的方法原文入口（不是事实结论）",
+                                         "content": json.dumps(method_locations, ensure_ascii=False)})
             # 中文说明：第十三轮的大纲 task 把 GCN 的线性扩展误写成内存瓶颈，
             # 即使提醒作者“仅作线索”，实际正文仍照抄。大纲只决定章节结构、
             # 标题和字数；正文的事实范围由用户原始要求与可核实原文决定。
