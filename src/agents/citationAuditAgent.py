@@ -131,13 +131,21 @@ class CitationAuditAgent(BaseAgent):
                 paper_chunks = [chunk for chunk in allowed if canonical(chunk.paperId) == paper_id]
                 hint = str((source_hints or {}).get(paper_id) or "").strip()
                 matches = bm25_rank(hint or unit, paper_chunks, 2 if hint else 1)
+                # 中文说明：阅读阶段的方法说明可能附有已索引的真实切片编号。
+                # 第二十二轮 GIN 综合句只绑定了实验章中“把 sum 换成 mean/max”
+                # 的间接段落，直接定义 GIN 的方法章切片在四段上限外。
+                # 把说明中的编号当作找原文的候选位置；说明文字本身不交给
+                # 核查模型当证据，编号必须确实属于本会话该篇论文。
+                hint_chunk_ids = [chunk_id for chunk_id in re.findall(r"\[([^\[\]\n]+)\]", hint)
+                                  if chunk_id in by_id and canonical(by_id[chunk_id].paperId) == paper_id]
                 # 中文说明：每篇论文先留一个位置。若正文作者已经给本段绑定了
                 # 该篇真实切片，优先让独立审计看到它；没有绑定再用英文方法线索
                 # 找候选。绑定只决定“看哪段原文”，绝不决定事实是否受支持。
                 paper_bound = next((chunk_id for chunk_id in bound_ids
                                     if chunk_id in by_id and canonical(by_id[chunk_id].paperId) == paper_id), "")
-                if paper_bound or matches:
-                    per_paper_ids.append(paper_bound or matches[0][0])
+                if paper_bound or hint_chunk_ids or matches:
+                    per_paper_ids.append(paper_bound or (hint_chunk_ids or [matches[0][0]])[0])
+                secondary_ids.extend(hint_chunk_ids)
                 if matches:
                     secondary_ids.extend(chunk_id for chunk_id, _ in matches[1:])
             candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + secondary_ids
@@ -170,6 +178,7 @@ class CitationAuditAgent(BaseAgent):
              "对每个 index 检查所有事实、数字、比较及每条引用的归属；只要有一个事实没有支撑，就不能 supported。"
              "引用论文与主张不符为 contradicted；证据不够为 insufficient；仅无事实主张的标题、结构说明可 not_required。"
              "摘要中纯粹描述本文写作范围的句子（如‘本文综述五种方法’）不是原论文事实，可判 not_required；但只要同句还评价方法性能、适用性或研究共识，仍须逐项用原文核查。"
+             "例如‘本文覆盖GCN、GraphSAGE和GAT三种方法’仅列本文选题，判 not_required，不要为了证明本文章节范围去检索这三篇论文；若写成‘GCN使用某机制、GAT改善某性能’，则是论文事实，必须逐项核查。"
              "未在当前候选片段中找到数字或表格行，只能判 insufficient，不能据此断言原论文没有或判 contradicted；只有原文直接给出相冲突的事实时才判 contradicted。"
              "supported 必须提供支撑全部事实的连续原文 quote 与 chunkId，不得凭常识判断。"
              "可用多条连续原文共同支撑一个段落，不要求所有事实出现在同一条引句中。"

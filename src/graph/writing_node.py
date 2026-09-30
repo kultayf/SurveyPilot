@@ -332,6 +332,16 @@ def run_writing_node():
 
         requested_length = re.search(r"(\d{2,4})\s*字", str(state.get("writing_instruction") or ""))
         abstract_instruction = str(state.get("writing_instruction") or "") if "abstract" in target_ids else ""
+        if brief_mechanism and len(named_arxiv_ids) >= 3:
+            # 中文说明：多篇简明综述若把五个方法的机制全部塞进摘要首句，
+            # 独立审计很难逐项找到足够原文。限定为范围句、一个已核实
+            # 的机制句和比较边界句，仍须由后续审计检查具体事实。
+            abstract_instruction += "\n严格只写三句。第一句只列本文覆盖的方法名称，不逐项解释各方法机制。第二句只写一个正文已有直接原文支持的具体机制事实，不推断历史演进、研究共识或显著差异。第三句只写本文的比较范围。"
+        if brief_mechanism and ("跨任务" in topic_text or "不同任务" in topic_text):
+            # 中文说明：用户要求避免不同任务的数值排名，是这篇综述的写作
+            # 选择，不是原论文证明“五种方法绝对不能比较”。第二十二轮
+            # 摘要把选择写成绝对科研结论，独立审计因此正确拦下。
+            abstract_instruction += "\n若需说明比较边界，只写‘本文不作跨任务性能数值比较’，不要写‘方法不可直接比较’‘研究显著不同’或暗示原论文证明了绝对不可比。"
         if state.get("audit_revision"):
             # 中文说明：旧版只把独立审计的失败理由交给正文小节，摘要每次都在
             # 不知道自己哪里错的情况下重写，常再次把“不作排名”说成论文结论。
