@@ -79,18 +79,33 @@ async def async_extract_paper_from_chunks(
     cached = await asyncio.to_thread(_load_cached_extraction, output_path, valid_chunk_ids, chunks_content_hash(chunks))
     if cached is not None:
         return cached
-    response = await _call_model(
-        llm,
-        _extraction_messages(paper, chunks),
-        runtime_resources=runtime_resources,
-    )
+    messages = _extraction_messages(paper, chunks)
+    response = await _call_model(llm, messages, runtime_resources=runtime_resources)
     if not response.ok:
         detail = response.content.strip() or response.error_code or response.error_type or "未知错误"
         raise RuntimeError(f"全文提取模型调用失败：{detail}")
     payload = _parse_json_response(response)
     if payload is None:
         raise ValueError("全文提取模型没有返回合法 JSON")
-    extraction = _validate_extraction(payload, valid_chunk_ids=valid_chunk_ids)
+    try:
+        extraction = _validate_extraction(payload, valid_chunk_ids=valid_chunk_ids)
+    except ValueError as first_error:
+        # 中文说明：第 29 轮模型把真实切片编号的末尾哈希写错，严格校验
+        # 必须拒绝，不能只凭前半段相似就替它补成另一个编号。把具体错误
+        # 告诉同一个模型并重发同一份全文一次；它须自己从输入复制完整编号。
+        # 第二次仍不合格就按原逻辑报错，留下明确失败记录。
+        retry_messages = [*messages, {"role": "user", "content":
+                          "上次六字段 JSON 未通过原文编号校验：" + str(first_error)[:500]
+                          + "。请重新阅读上面同一份 chunks，只复制其中完整且真实存在的 chunkId。"
+                            "仍只返回六个字符串字段的合法 JSON；证据不足的字段留空，不要猜编号。"}]
+        retry = await _call_model(llm, retry_messages, runtime_resources=runtime_resources)
+        if not retry.ok:
+            detail = retry.content.strip() or retry.error_code or retry.error_type or "未知错误"
+            raise RuntimeError(f"全文提取编号重试模型调用失败：{detail}")
+        retry_payload = _parse_json_response(retry)
+        if retry_payload is None:
+            raise ValueError("全文提取编号重试没有返回合法 JSON")
+        extraction = _validate_extraction(retry_payload, valid_chunk_ids=valid_chunk_ids)
     record: JsonObject = {
         "schema_version": 3,
         "chunks_hash": chunks_content_hash(chunks),
