@@ -1122,7 +1122,11 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
                                  "section": chunk.get("section"),
                                  "page_start": chunk.get("page_start"),
                                  "page_end": chunk.get("page_end"),
-                                 "content": str(chunk.get("content") or "")[:750]})
+                                 # 中文说明：第 32 轮 CoaT 的方法定义在同一真实
+                                 # 子切片的 700–900 字符处；旧 750 字截断把关键
+                                 # 操作名称截掉，作者只能猜。保留短切片至 1200 字，
+                                 # 不增加候选条数，也不允许用父段代替子切片。
+                                 "content": str(chunk.get("content") or "")[:1200]})
             papers.append({"paperId": record.get("paperId"), "status": record.get("status"),
                            "chunks": snippets})
         return json.dumps({"tool": "search_section", "papers": papers,
@@ -1148,7 +1152,7 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
             "chunkId": chunk_id,
             "page_start": chunk.get("page_start"),
             "page_end": chunk.get("page_end"),
-            "content": str(chunk.get("content") or "")[:650],
+            "content": str(chunk.get("content") or "")[:1200],
         })
         per_paper[paper_id.casefold()] = per_paper.get(paper_id.casefold(), 0) + 1
         if len(shown) >= 10:
@@ -1228,7 +1232,10 @@ def _review_messages(state: SectionLoopState, located: JsonObject | None = None)
                 "claim": str(binding.get("claim") or "")[:220],
                 "chunkId": str(chunk.get("chunkId") or ""),
                 "原文前文": before,
-                "已绑定原文": content[:520],
+                # 中文说明：本地审稿必须看到作者实际绑定子切片中完整的短方法句；
+                # 520 字预览曾恰好截掉 CoaT 两条关键定义而误以为无直接证据。
+                # 仍只展示真实子切片，不把父段或模型摘要当成已绑定证据。
+                "已绑定原文": content[:1200],
             })
             if len(source_excerpts) >= 12:
                 break
