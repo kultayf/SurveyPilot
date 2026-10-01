@@ -24,10 +24,10 @@ WritingAction = Literal["tool", "draft"]
 
 # 中文说明：一次长综述会写很多小节。每节给出明确上限，避免模型反复检索、重写，
 # 把同一批长证据重复发送几十次；达到上限时保留失败标记，不能冒充核查通过。
-# 中文说明：第 25 轮 GCN、GIN 修订节在约 5 万 token 时已有正文，却因
-# 预算先耗尽而跳过文风审查；实际耗时远低于 480 秒。留出审查余量，
-# 同时继续保持每节有界，超过上限仍明确标为未核查。
-SECTION_TOKEN_BUDGET = 70000
+# 中文说明：第 28 轮 GCN 修订在约 5.7 万 token、不到两分钟时仍有
+# 范围错误；GIN 的最后草稿只漏了首句引用，但两次修改上限已用尽。
+# 给第三次有界修改及审查留余量，超预算仍保留失败标记，绝不自动放行。
+SECTION_TOKEN_BUDGET = 90000
 SECTION_TIME_BUDGET_SECONDS = 480
 WRITE_CALL_TIMEOUT_SECONDS = 120
 # 中文说明：兼容节点的输出额度同时覆盖内部推理。第 23 轮 GCN 首稿
@@ -105,9 +105,10 @@ class WritingAgent(BaseAgent):
         context.spec = self.spec
         super().__init__(context)
         self.max_tool_calls = 2
-        # 中文说明：真实任务里一轮修改常常只能补齐一部分逐句引用。允许再改一次，
-        # 但仍受单节 token 和时间上限约束；到上限时保留失败状态，绝不自动放行。
-        self.max_revision_rounds = 2
+        # 中文说明：第 28 轮 GIN 最后一稿只漏首句引用，两次修改已用完。
+        # 多给一次明确有界的整改机会；仍受本节用量和时间上限限制，
+        # 第三次还不合格就如实标为本地检查失败。
+        self.max_revision_rounds = 3
 
     def _run(self, state: JsonObject) -> JsonObject:
         """BaseAgent 要求同步入口，但当前写作节点只使用异步入口。"""
@@ -163,8 +164,8 @@ class WritingAgent(BaseAgent):
             "completed": False,
             "warnings": [],
             "spent_tokens": 0,
-            # 中文说明：多论文比较需核对多篇原文，可以由外层给出更高、但仍
-            # 明确有上限的预算；普通单论文小节继续沿用五万 Token 上限。
+            # 中文说明：多论文比较需核对多篇原文，可以由外层提出更高、
+            # 但仍明确有上限的预算；普通小节采用上面统一的有界额度。
             "token_budget": max(SECTION_TOKEN_BUDGET, int(token_budget or SECTION_TOKEN_BUDGET)),
             "started_at": time.monotonic(),
             "progress_callback": progress_callback,
