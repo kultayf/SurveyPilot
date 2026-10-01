@@ -60,8 +60,8 @@ class CitationAuditAgent(BaseAgent):
         candidate_maps: dict[int, dict[str, TextChunk]] = {}
         # 一次最多核查 40 段。多数段落取 4 个原文片段；若正文实际引用了
         # 5 篇以上论文，就至少给每篇留一个候选位置，否则该段永远不可能
-        # 满足“每个引用都要有原文”的严格规则。最多仍限制为 8 个，超出的
-        # 段落继续保留待核查，不靠省略来源冒充通过。
+        # 满足“每个引用都要有原文”的严格规则。最多十个候选，超出本节
+        # 输入预算的段落仍保留待核查，不靠省略来源冒充通过。
         # 中文说明：摘要按事实句核查时可能有八句以上。旧的四万字符预算会让
         # 末句直接变成“未验证”，即使模型上下文还有空间；上限提高到六万，
         # 仍留出提示词与模型回复余量，超出的句子照旧保留未通过状态。
@@ -121,13 +121,18 @@ class CitationAuditAgent(BaseAgent):
             # 中文说明：一段可能有五个事实句、四个不同的原文切片。旧版固定只给
             # 单论文四个位置，还先放方法概述候选，导致写作时确实定位的末尾切片
             # 被挤掉。按不同切片的数量适度增加位置，最多仍为八个。
-            candidate_limit = min(8, max(4, len(source_ids), len(set(bound_ids))))
+            # 中文说明：五篇定性比较各有一条作者绑定原文。若每篇只给一段，
+            # GIN 的“求和”可能只绑到笼统引言，方法章的直接定义看不到。
+            # 每篇最多再留一个方法候选、总数最多十段；仍受本节输入预算限制，
+            # 多给候选只帮助查证，绝不自动把正文判为支持。
+            candidate_limit = min(10, max(4, len(source_ids) * 2, len(set(bound_ids))))
             ranked = bm25_rank(unit, allowed, candidate_limit)
             # 中文说明：中文综述对英文原文做关键词排序时，容易把表格或章节标题
             # 排在真正的方法定义前面。阅读阶段提取的英文方法说明只作为检索词，
             # 用它从同一篇已索引原文里找候选；说明本身绝不交给核查模型充当证据。
             # 跨论文段落仍先给每篇一个位置，随后保留写作时的切片绑定和其他候选。
             per_paper_ids = []
+            method_candidate_ids = []
             secondary_ids = []
             for paper_id in sorted(source_ids):
                 paper_chunks = [chunk for chunk in allowed if canonical(chunk.paperId) == paper_id]
@@ -147,10 +152,20 @@ class CitationAuditAgent(BaseAgent):
                                     if chunk_id in by_id and canonical(by_id[chunk_id].paperId) == paper_id), "")
                 if paper_bound or hint_chunk_ids or matches:
                     per_paper_ids.append(paper_bound or (hint_chunk_ids or [matches[0][0]])[0])
+                # 中文说明：阅读阶段的编号可能先列摘要、引言，再列方法章。
+                # 优先选择标题不像摘要/引言/实验的原文切片作为第二候选；
+                # 如果没有这种切片，再按原顺序给候选，不能猜测不存在的编号。
+                direct_hint = next((chunk_id for chunk_id in hint_chunk_ids
+                                    if not re.search(r"abstract|introduction|experiment|result|conclusion",
+                                                     str(by_id[chunk_id].section or ""), re.IGNORECASE)), "")
+                if not direct_hint and hint_chunk_ids:
+                    direct_hint = hint_chunk_ids[0]
+                if direct_hint:
+                    method_candidate_ids.append(direct_hint)
                 secondary_ids.extend(hint_chunk_ids)
                 if matches:
                     secondary_ids.extend(chunk_id for chunk_id, _ in matches[1:])
-            candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + secondary_ids
+            candidate_ids = list(dict.fromkeys(per_paper_ids + method_candidate_ids + bound_ids + secondary_ids
                                                + [chunk_id for chunk_id, _ in ranked]))
             allowed_chunk_ids = {c.chunk_id for c in allowed}
             candidates = {chunk_id: by_id[chunk_id] for chunk_id in candidate_ids if chunk_id in allowed_chunk_ids}
