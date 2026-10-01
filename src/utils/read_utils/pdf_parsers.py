@@ -41,16 +41,28 @@ class PyMuPDF4LLMParser:
     def parse(self, source_path: Path) -> PdfParseResult:
         """按页返回 Markdown；不生成图片文件，也不自动下载模型。"""
 
+        import pymupdf
         import pymupdf4llm
 
         pages = pymupdf4llm.to_markdown(
             str(source_path), page_chunks=True, write_images=False, show_progress=False, use_ocr=False,
         )
-        result = PdfParseResult(pages=[
-            ParsedPdfPage(page_number=index, text=str(page.get("text") or "").strip(),
-                          metadata={"parser": self.name})
-            for index, page in enumerate(pages, start=1)
-        ])
+        parsed_pages: list[ParsedPdfPage] = []
+        with pymupdf.open(source_path) as document:
+            for index, page in enumerate(pages, start=1):
+                markdown = str(page.get("text") or "").strip()
+                # 中文说明：版面转换偶尔把公式中的求和号、上下标变成无法识别
+                # 的字符。只在确实出现这种损坏时，从同一份 PDF 的同一页再取
+                # 一份普通文字，供后续作者和审计逐字查证；原 Markdown 不删除，
+                # 页码不变，警告也继续保留。普通文字可能仍不完美，不能据此
+                # 宣称公式已验证，更不能从其他论文或模型记忆补出缺失符号。
+                if "\ufffd" in markdown and index <= len(document):
+                    plain = document[index - 1].get_text("text").strip()
+                    if plain and plain.count("\ufffd") < markdown.count("\ufffd"):
+                        markdown += "\n\n### 同页 PDF 纯文本补充（公式仍需核对原页）\n\n" + plain
+                parsed_pages.append(ParsedPdfPage(page_number=index, text=markdown,
+                                                  metadata={"parser": self.name}))
+        result = PdfParseResult(pages=parsed_pages)
         result.warnings = _page_warnings(result.pages)
         return result
 

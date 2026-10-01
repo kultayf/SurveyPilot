@@ -90,7 +90,9 @@ def _convert_with_cache(paper: PaperDocument, source_path: Path, source_url: str
         parser_version = "not-installed"
     try:
         source_hash = file_sha256(source_path)
-        expected = {"schema_version": 3, "source_hash": source_hash,
+        # 中文说明：PDF 损坏页现在会带同页纯文本补充。旧缓存虽来自同一 PDF，
+        # 内容却缺少这份自动补充，所以提高版本号让下次阅读重新解析和切块。
+        expected = {"schema_version": 4, "source_hash": source_hash,
                     "parser": parser_name if suffix == ".pdf" else "html", "parser_version": parser_version,
                     "artifacts_path": str(docling_artifacts_path or ""), "paperId": paper.paperId or paper.id,
                     "source_url": source_url, "title": paper.title}
