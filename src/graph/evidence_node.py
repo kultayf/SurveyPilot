@@ -322,6 +322,7 @@ async def run_audit_node(state: State) -> State:
         if len(cited_ids) == 1 and title_match:
             abstract_paper_terms.setdefault(title_match.group(1).casefold(), str(cited_ids[0]))
     reports = []
+    peer_evidence = [binding for section in sections for binding in section.get("citation_evidence") or []]
     generation_errors = []
     review_errors = []
     try:
@@ -339,12 +340,13 @@ async def run_audit_node(state: State) -> State:
             if (section.get("review") or {}).get("passed") is False:
                 review_errors.append(section_id)
             reports.append(await agent.audit(section, chunks, aliases, writing.get("references") or [],
-                                             source_hints=source_hints))
+                                             source_hints=source_hints, peer_evidence=peer_evidence))
         # 摘要不能因为没有正式引用标记而跳过事实核查。
         _check_cancel(state)
         reports.append(await agent.audit({"section_id": "abstract", "content": writing.get("abstract") or ""},
                                         chunks, aliases, writing.get("references") or [], abstract=True,
-                                        source_hints=source_hints, abstract_paper_terms=abstract_paper_terms))
+                                        source_hints=source_hints, abstract_paper_terms=abstract_paper_terms,
+                                        peer_evidence=peer_evidence))
     finally:
         if owned and llm:
             await llm.aclose()

@@ -43,7 +43,8 @@ class CitationAuditAgent(BaseAgent):
 
     async def audit(self, section: dict, chunks: list[TextChunk], aliases: dict[str, str], references: list[dict],
                     *, abstract: bool = False, source_hints: dict[str, str] | None = None,
-                    abstract_paper_terms: dict[str, str] | None = None) -> dict:
+                    abstract_paper_terms: dict[str, str] | None = None,
+                    peer_evidence: list[dict] | None = None) -> dict:
         """先验证引用归属，再要求模型判断每段的所有事实；任何漏项都不算通过。"""
         content = str(section.get("content") or "") if abstract else str(section.get("source_content") or section.get("content") or "")
         units = audit_units(content)
@@ -132,6 +133,7 @@ class CitationAuditAgent(BaseAgent):
             # 用它从同一篇已索引原文里找候选；说明本身绝不交给核查模型充当证据。
             # 跨论文段落仍先给每篇一个位置，随后保留写作时的切片绑定和其他候选。
             per_paper_ids = []
+            peer_candidate_ids = []
             method_candidate_ids = []
             secondary_ids = []
             for paper_id in sorted(source_ids):
@@ -152,6 +154,27 @@ class CitationAuditAgent(BaseAgent):
                                     if chunk_id in by_id and canonical(by_id[chunk_id].paperId) == paper_id), "")
                 if paper_bound or hint_chunk_ids or matches:
                     per_paper_ids.append(paper_bound or (hint_chunk_ids or [matches[0][0]])[0])
+                # 中文说明：跨论文综合句常把单论文节已经找到的具体操作重新概括，
+                # 却只绑定该论文的笼统引言。用本稿其他小节的“主张→真实切片”作
+                # 候选检索，按中文四字短语重合度选一段；主张本身绝不送审计模型
+                # 充当证据，且只能选同一论文、当前会话确实存在的原文切片。
+                peer_matches = []
+                unit_terms = {unit[pos:pos + 4] for pos in range(max(0, len(unit) - 3))
+                              if re.search(r"[\u4e00-\u9fff]", unit[pos:pos + 4])}
+                for binding in peer_evidence or []:
+                    if canonical(binding.get("paperId") or "") != paper_id:
+                        continue
+                    claim = str(binding.get("claim") or "")
+                    overlap = sum(term in claim for term in unit_terms)
+                    if not overlap:
+                        continue
+                    for source in binding.get("chunks") or []:
+                        chunk_id = str(source.get("chunkId") or "")
+                        if (chunk_id in by_id and chunk_id not in bound_ids
+                                and canonical(by_id[chunk_id].paperId) == paper_id):
+                            peer_matches.append((overlap, chunk_id))
+                if peer_matches:
+                    peer_candidate_ids.append(max(peer_matches, key=lambda item: item[0])[1])
                 # 中文说明：阅读阶段的编号可能先列摘要、引言，再列方法章。
                 # 优先选择标题不像摘要/引言/实验的原文切片作为第二候选；
                 # 如果没有这种切片，再按原顺序给候选，不能猜测不存在的编号。
@@ -165,7 +188,7 @@ class CitationAuditAgent(BaseAgent):
                 secondary_ids.extend(hint_chunk_ids)
                 if matches:
                     secondary_ids.extend(chunk_id for chunk_id, _ in matches[1:])
-            candidate_ids = list(dict.fromkeys(per_paper_ids + method_candidate_ids + bound_ids + secondary_ids
+            candidate_ids = list(dict.fromkeys(per_paper_ids + peer_candidate_ids + method_candidate_ids + bound_ids + secondary_ids
                                                + [chunk_id for chunk_id, _ in ranked]))
             allowed_chunk_ids = {c.chunk_id for c in allowed}
             candidates = {chunk_id: by_id[chunk_id] for chunk_id in candidate_ids if chunk_id in allowed_chunk_ids}
@@ -285,6 +308,84 @@ class CitationAuditAgent(BaseAgent):
             except Exception:
                 # 中文说明：补问只是减少偶发遗漏，不是验收门禁；失败时
                 # 原本的 unverified 会原样保留。
+                pass
+        # 中文说明：模型可能语义判为支持，却在复制带 Markdown/公式的英文句子时
+        # 漏掉一个字符。只对“引句不能逐字定位”的原句补问一次，输入仍为同一
+        # 正文与同一批原文切片；补问结果还会走下方完整的逐字与引用归属校验。
+        # 补问失败时保留原结果，由硬门禁判不足，不能直接信任模型口头判断。
+        for position, verdict in enumerate(verdicts):
+            if not isinstance(verdict, dict) or verdict.get("status") != "supported":
+                continue
+            index = verdict.get("index")
+            if type(index) is not int or index not in candidate_maps:
+                continue
+            raw_evidence = verdict.get("evidence")
+            if not isinstance(raw_evidence, list) or not raw_evidence:
+                continue
+            if all(isinstance(source, dict) and
+                   str(source.get("chunkId") or "") in candidate_maps[index] and
+                   str(source.get("quote") or "").strip() in
+                   candidate_maps[index][str(source.get("chunkId") or "")].content[:2400]
+                   for source in raw_evidence):
+                continue
+            retry_unit = next((item for item in payload if item["index"] == index), None)
+            if retry_unit is None:
+                continue
+            # 中文说明：仅靠再次要求“逐字复制”仍可能把公式标记抄错。
+            # 从该句已有候选原文构造短的连续字串，模型必须先独立判断语义，
+            # 再选能覆盖全部事实的选项编号；程序按编号取回真实原字，最终仍
+            # 经过与普通引句完全相同的逐字和论文归属检查。选项不含乱码。
+            quote_options = {}
+            for source in raw_evidence:
+                if not isinstance(source, dict):
+                    continue
+                chunk_id = str(source.get("chunkId") or "")
+                chunk = candidate_maps[index].get(chunk_id)
+                if not chunk:
+                    continue
+                source_text = chunk.content[:2400]
+                words = list(re.finditer(r"\S+", source_text))
+                for start in range(0, max(1, len(words) - 7), 8):
+                    if len(words) - start < 8:
+                        continue
+                    end = min(start + 16, len(words))
+                    quote = source_text[words[start].start():words[end - 1].end()]
+                    if "\ufffd" in quote or len(quote) > 220:
+                        continue
+                    option_id = f"q{len(quote_options)}"
+                    quote_options[option_id] = {"chunkId": chunk_id, "quote": quote}
+            if not quote_options:
+                continue
+            retry_messages = [{"role": "system", "content": messages[0]["content"] +
+                              " 本次只在 supported 时返回 evidence:[{chunkId,quoteOptionId}]；"
+                              "quoteOptionId 必须来自用户给出的 quote_options，需选择能共同支撑全部事实的片段；"
+                              "不得因为有选项就推定事实受支持，不足仍判 insufficient。"},
+                              {"role": "user", "content": json.dumps(
+                                  {"abstract": abstract, "units": [retry_unit], "quote_options": quote_options,
+                                   "note": "上一响应有引句无法逐字定位；请重新独立判断事实，再从原文连续片段中选编号。"},
+                                  ensure_ascii=False)}]
+            try:
+                retry = await asyncio.wait_for(
+                    self.context.llm.provider.chat(retry_messages, temperature=0, max_tokens=AUDIT_MAX_TOKENS),
+                    timeout=AUDIT_TIMEOUT_SECONDS,
+                )
+                self.report_usage(retry)
+                retry_parsed = _extract_json_object(str(retry.content)) if retry.ok else None
+                retry_verdicts = retry_parsed.get("verdicts") if isinstance(retry_parsed, dict) else None
+                if (isinstance(retry_verdicts, list) and len(retry_verdicts) == 1
+                        and isinstance(retry_verdicts[0], dict) and retry_verdicts[0].get("index") == index):
+                    replacement = retry_verdicts[0]
+                    selected = replacement.get("evidence")
+                    if replacement.get("status") == "supported" and isinstance(selected, list):
+                        mapped = []
+                        for source in selected:
+                            option = quote_options.get(str(source.get("quoteOptionId") or "")) if isinstance(source, dict) else None
+                            if option and str(source.get("chunkId") or "") == option["chunkId"]:
+                                mapped.append(option)
+                        if len(mapped) == len(selected) and mapped:
+                            replacement = {**replacement, "evidence": mapped}
+                    verdicts[position] = replacement
+            except Exception:
                 pass
         indices = [v.get("index") for v in verdicts if isinstance(v, dict)]
         for verdict in verdicts:
