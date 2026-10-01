@@ -62,8 +62,12 @@ def run_writing_node():
         # 350 到 400 字，作者为填篇幅加入了实验数据集与具体采样配置。用户没有
         # 指定每节字数时，把大纲字数当上限收紧；若用户明确给出字数，则尊重用户。
         topic_text = str(request.topic or "")
-        brief_mechanism = "简明" in topic_text and "只讨论" in topic_text
         named_arxiv_ids = list(dict.fromkeys(re.findall(r"arXiv\s*:\s*(\d{4}\.\d{4,5})", topic_text, re.IGNORECASE)))
+        brief_mechanism = "简明" in topic_text and "只讨论" in topic_text
+        # 中文说明：视觉 Transformer 任务同样明确要求“简明综述”并点名五篇，
+        # 但没有逐篇写“只讨论”。正文仍尊重大纲字数；摘要则应沿用简明任务
+        # 的保守三句范围，避免第 35 轮扩写无逐篇证据的跨方法分类标签。
+        brief_abstract = "简明" in topic_text and len(named_arxiv_ids) >= 3
         explicit_section_length = re.search(r"(?:每节|每小节|每段)\s*(?:约|不超过|至少)?\s*\d{2,4}\s*字", topic_text)
         if brief_mechanism and not explicit_section_length:
             for section_task in section_tasks:
@@ -368,12 +372,12 @@ def run_writing_node():
 
         requested_length = re.search(r"(\d{2,4})\s*字", str(state.get("writing_instruction") or ""))
         abstract_instruction = str(state.get("writing_instruction") or "") if "abstract" in target_ids else ""
-        if brief_mechanism and len(named_arxiv_ids) >= 3:
+        if brief_abstract:
             # 中文说明：多篇简明综述若把五个方法的机制全部塞进摘要首句，
             # 独立审计很难逐项找到足够原文。限定为范围句、一个已核实
             # 的机制句和比较边界句，仍须由后续审计检查具体事实。
             abstract_instruction += "\n严格只写三句。第一句只列本文覆盖的方法名称，不逐项解释各方法机制。第二句只写一个正文已有直接原文支持的具体机制事实，不推断历史演进、研究共识或显著差异。第三句只写本文的比较范围。"
-        if brief_mechanism and ("跨任务" in topic_text or "不同任务" in topic_text):
+        if brief_abstract and ("跨任务" in topic_text or "不同任务" in topic_text):
             # 中文说明：用户要求避免不同任务的数值排名，是这篇综述的写作
             # 选择，不是原论文证明“五种方法绝对不能比较”。第二十二轮
             # 摘要把选择写成绝对科研结论，独立审计因此正确拦下。
@@ -396,7 +400,7 @@ def run_writing_node():
                     # 此时不再转发上轮失败句，以免模型照搬无证据局限。
                     abstract_instruction += "\n上轮摘要独立核查未通过；请删除或收窄以下具体句子，不能凭前文或常识保留原结论：" + json.dumps(failed_abstract[:8], ensure_ascii=False)
         abstract_sections = written_sections
-        if brief_mechanism and state.get("audit_revision"):
+        if brief_abstract and state.get("audit_revision"):
             # 中文说明：第十八轮摘要修订虽看到失败理由，仍照搬上一版未经证实的
             # 五篇局限。修订摘要只能阅读“上一轮独立审计支持、且本轮正文仍原样
             # 保留”的事实句；改写过或审计未过的句子不能借旧版正文混进摘要。
@@ -441,7 +445,7 @@ def run_writing_node():
                 language=request.language,
                 # 中文说明：简明综述若没有用户指定摘要字数，短摘要即可说明范围；
                 # 旧的 300 字目标迫使模型逐篇扩写未充分取证的技术细节。
-                word_count=int(requested_length.group(1)) if requested_length else (120 if brief_mechanism else 300),
+                word_count=int(requested_length.group(1)) if requested_length else (120 if brief_abstract else 300),
                 instruction=abstract_instruction,
                 usage_callback=report_abstract_usage,
             )
