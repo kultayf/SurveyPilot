@@ -15,7 +15,7 @@ from src.graph.evidence_node import (
 from src.graph.matrix_review_node import run_matrix_review_node
 from src.graph.citation_node import run_citation_node
 from src.graph.conflict_node import run_conflict_node
-from src.graph.reply_node import run_compose_reply_node
+from src.graph.reply_node import missing_requested_arxiv_ids, run_compose_reply_node
 from src.graph.read_node import run_read_node
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
 from src.graph.search_node import run_search_agent_node
@@ -67,6 +67,11 @@ def _route_after_search(state: State) -> str:
         return "reply"
     if not state.get("search_results"):
         return "reply"
+    # 中文说明：第 34 轮一次 arXiv 超时只检出指定五篇中的三篇，旧流程仍继续
+    # 阅读和写作，可能生成看似完整却缺两篇原论文的综述。用户明确写出编号时，
+    # 检索名单必须逐篇覆盖；不足就在此有界停止并给出缺失编号，不用其他论文顶替。
+    if missing_requested_arxiv_ids(state["request"].topic, list(state.get("search_results") or [])):
+        return "reply"
     return "continue"
 
 
@@ -78,6 +83,12 @@ def _route_after_read(state: State) -> str:
     # 中文说明：即使论文拿到了精读名额，下载、解析或建索引失败时仍没有可审计的
     # 原文片段。只有至少一篇论文完成索引，后续矩阵、分析和写作才有可靠输入。
     if indexed_count < 1:
+        return "reply"
+    # 中文说明：检索到论文不等于已解析全文。若指定编号在下载或切块阶段失败，
+    # 写作也必须停止；只检查 status=indexed 的本轮阅读记录，不用旧缓存凑数。
+    indexed_papers = [result.get("paper") or {} for result in state.get("read_results") or []
+                      if (result.get("full_text") or {}).get("status") == "indexed"]
+    if missing_requested_arxiv_ids(state["request"].topic, indexed_papers):
         return "reply"
     return "continue"
 

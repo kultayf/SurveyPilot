@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from src.utils.export_utils.research_exports import build_research_exports
@@ -10,6 +11,20 @@ from src.repositories.sessions.base import SessionRepository
 
 
 FINAL_ARTIFACT_VERSION = "1.0"
+
+
+def missing_requested_arxiv_ids(topic: str, papers: list[Any]) -> list[str]:
+    """只对用户明确写出的 arXiv 编号检查来源覆盖，不猜测简称对应的论文。"""
+
+    requested = set(re.findall(r"arxiv\s*:\s*(\d{4}\.\d{4,5})", str(topic), re.IGNORECASE))
+    found = set()
+    for item in papers:
+        paper = item if isinstance(item, dict) else item.to_dict()
+        metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+        for value in (paper.get("id"), paper.get("paperId"), paper.get("url"),
+                      paper.get("pdf_url"), metadata.get("arxiv_id"), metadata.get("arxiv_versioned_id")):
+            found.update(re.findall(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)", str(value or "")))
+    return sorted(requested - found)
 
 
 def run_compose_reply_node():
@@ -37,6 +52,11 @@ def run_compose_reply_node():
         writing_artifact_refs = list(state.get("writing_artifact_refs") or [])
         final_artifact_refs = list(state.get("final_artifact_refs") or [])
         diagnostics = dict(state.get("diagnostics") or {})
+        topic = str(getattr(state.get("request"), "topic", "") or "")
+        missing_search_ids = missing_requested_arxiv_ids(topic, papers)
+        indexed_papers = [result.get("paper") or {} for result in read_results
+                          if (result.get("full_text") or {}).get("status") == "indexed"]
+        missing_fulltext_ids = missing_requested_arxiv_ids(topic, indexed_papers) if not missing_search_ids else []
 
         # 中文说明：只有写作节点真的产出了正文、摘要或参考文献，才生成最终文件。
         # 以前只要请求里有 topic 就会生成一个只有标题的“待核查草稿”，导致检索失败时
@@ -92,6 +112,14 @@ def run_compose_reply_node():
         if final_markdown:
             # 中文说明：最终回复直接展示完整 Markdown，前端可以预览，文件产物则用于下载和长期保存。
             assistant_text = final_markdown
+        elif missing_search_ids:
+            assistant_text = ("检索未覆盖用户明确指定的原论文 "
+                              + "、".join(f"arXiv:{paper_id}" for paper_id in missing_search_ids)
+                              + "。本轮已在写作前停止，不生成不完整综述；请检查检索来源并重试。")
+        elif missing_fulltext_ids:
+            assistant_text = ("用户指定的原论文全文未成功索引："
+                              + "、".join(f"arXiv:{paper_id}" for paper_id in missing_fulltext_ids)
+                              + "。本轮已在写作前停止，不生成不完整综述。")
         elif not papers:
             assistant_text = _build_search_stopped_message(summary, diagnostics)
         elif int(read_summary.get("indexed_paper_count") or 0) < 1:
@@ -133,12 +161,15 @@ def run_compose_reply_node():
             # 中文说明：没有论文时仍然正常生成一条可读回复，但状态必须保留真实停止原因，
             # 不能把“已说明失败”误记为“完整研究流程成功”。
             "status": (
+                "missing_requested_search" if missing_search_ids else
+                "missing_requested_fulltext" if missing_fulltext_ids else
                 "no_eligible_read"
                 if papers and int(read_summary.get("indexed_paper_count") or 0) < 1
                 else "ok" if papers else str(summary.get("status") or "no_results")
             ),
             "final_markdown": bool(final_markdown),
             "final_artifact_count": len(final_artifact_refs),
+            "missing_requested_arxiv_ids": missing_search_ids or missing_fulltext_ids,
         }
 
         assistant_metadata: JsonObject = {
