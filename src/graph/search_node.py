@@ -311,6 +311,37 @@ async def _execute_search_intent(
     """按每个子主题调用检索服务，并把所有候选论文合并到一起。"""
 
     subtopics = intent.subtopics or [SearchSubtopic(subtopic=intent.topic or "综合检索", keyword=" ".join(intent.keywords))]
+    requested_ids = list(dict.fromkeys(re.findall(r"arxiv\s*:\s*(\d{4}\.\d{4,5}(?:v\d+)?)", intent.topic, re.IGNORECASE)))
+    if [source.lower() for source in intent.sources] == ["arxiv"] and requested_ids and len(requested_ids) <= intent.max_results:
+        # 中文说明：用户已逐篇给出 arXiv 编号时，一次把这些编号交给 arXiv 的
+        # id_list 接口即可。原来的逐子主题请求会把五篇变成五次访问，更容易撞到
+        # 网站限流；这里不改论文筛选或缺篇停止规则，只减少相同来源的请求次数。
+        response = await service.async_search(
+            query=intent.topic,
+            topic=intent.topic,
+            source="arxiv",
+            limit=max(1, intent.max_results),
+            year_from=intent.year_from,
+            year_to=intent.year_to,
+            excluded_terms=intent.excluded_terms,
+            truncate=False,
+            runtime_resources=runtime_resources,
+        )
+        for paper in response.papers:
+            # 中文说明：批量取回后仍把论文归到模型规划的子主题，前端方向列表
+            # 便能显示对应来源；若模型没有在子主题写编号，则保留一个综合来源。
+            paper_id = str((paper.metadata or {}).get("arxiv_id") or paper.paperId or "")
+            paper_id = re.sub(r"v\d+$", "", paper_id)
+            matched = [item for item in subtopics if paper_id and paper_id in f"{item.subtopic} {item.keyword}"]
+            for item in matched or subtopics[:1]:
+                _attach_search_origin(paper, item)
+        return SearchExecutionResult(
+            papers=list(response.papers),
+            raw_candidate_count=sum(response.source_results.values()) or len(response.papers),
+            sources_used=list(response.sources_used),
+            source_results=dict(response.source_results),
+            source_errors=dict(response.errors),
+        )
     # 中文说明：没有统一运行时资源的直接调用也可能一次生成多个子主题。
     # 服务层的信号量只约束“单个子主题里的多个来源”，不能限制全部子主题
     # 同时向同一外部站点发请求；在这里再给子主题设总上限，避免瞬时放大负载。
