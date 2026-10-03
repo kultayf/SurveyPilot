@@ -72,6 +72,22 @@ def run_writing_outline_node():
                 cast(State, retry_state), agent=agent, usage_callback=report_outline_usage,
             )
             raw_model_output += "\n--- 按用户明确结构补写大纲 ---\n" + retry_raw
+            # 中文说明：结构失败也必须保留两次真实模型输出与失败原因，便于区分
+            # 模型漏写和校验格式问题；失败产物明确标记，不能进入正文写作。
+            failure_issue = (f"{structure_issue}；{retry_reason}" if retry_outline is None
+                             else _explicit_named_paper_outline_problem(retry_outline, request))
+            if failure_issue:
+                failed_ref = await _persist_outline_if_possible(state, {
+                    "outline_version": WRITING_OUTLINE_VERSION,
+                    "topic": request.topic,
+                    "writing_outline": retry_outline or outline,
+                    "execution_metadata": {"status": "failed", "created_at": utc_now(),
+                                           "message": failure_issue, "attempt_count": 2},
+                    "diagnostics": {"raw_model_output": raw_model_output,
+                                    "initial_structure_issue": structure_issue},
+                })
+                if failed_ref and reporter is not None:
+                    reporter.artifact(failed_ref, stage="writing_outline_failed_artifact_ready")
             if retry_outline is None:
                 raise ValueError(f"大纲未满足用户明确结构，补写失败：{structure_issue}；{retry_reason}")
             retry_issue = _explicit_named_paper_outline_problem(retry_outline, request)

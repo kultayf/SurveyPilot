@@ -157,6 +157,9 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
             # 原论文可能是英文，章节标题仍须遵循用户选择的输出语言。
             "输出语言": getattr(request, "language", "zh"),
             "语言要求": "章节标题、小节标题、描述和任务说明均使用输出语言；保留必要的专有名词。",
+            # 中文说明：逐篇小节的归属校验读取 task，不从标题猜论文；明确编号格式，
+            # 避免模型只写方法名而导致结构补写仍无法确认唯一来源。
+            "逐篇小节归属格式": "若用户点名 arXiv 原论文并要求单论文小节，每个单论文小节的 task 必须显式包含且只包含其对应论文的 arXiv:编号；不能仅在标题或 evidence-map 写编号。比较小节可包含多篇论文编号。",
             "任务": "根据 overall_framework 生成章节和小节级别的写作大纲"
                   + ("；必须修正下列结构问题，并严格保留用户要求的逐篇小节和比较小节"
                      if state.get("outline_structure_feedback") else ""),
