@@ -184,6 +184,9 @@ class WritingAgent(BaseAgent):
             "completed": bool(final_state.get("completed")),
             "generation_failed": bool(final_state.get("generation_failed")),
             "warnings": list(final_state.get("warnings") or []),
+            # 中文说明：保留实际模型回复，便于区分正文问题与审查格式问题；
+            # 只保存在本地小节产物，不把它们当成事实支持证据。
+            "raw_model_outputs": list(final_state.get("raw_model_outputs") or []),
         }
         # 中文说明：结构化摘要里的来源标记和切片检索返回的 chunkId 都是“证据位置”，
         # 不能直接作为正文引用。这里在小节离开 Agent 前统一换成真正的 paperId，
@@ -469,12 +472,15 @@ class WritingAgent(BaseAgent):
                 problems.append(f"事实句“{sentence[:50]}”可能把推导特例当成最终模型参数量；请核对最终公式，不能证明就删去该概括。")
             # 科研小节中的分析结论同样来自论文证据。统一要求逐句引用，避免模型只在段末
             # 放一个编号，让读者无法判断它究竟支撑哪一个数字或比较。
-            if len(re.sub(r"\s+", "", sentence)) >= 15 and not re.search(r"\[[^\[\]\n]+\]", sentence):
+            if len(re.sub(r"\s+", "", sentence)) >= 15 and not any(
+                not _is_non_citation_marker(marker)
+                for marker in re.findall(r"\[([^\[\]\n]+)\]", sentence)
+            ):
                 problems.append(f"事实或分析句“{sentence[:40]}”缺少逐句引用。")
             # 方括号本身不能证明引用有效；逐个编号核对本句的真实证据，防止未知编号
             # 或其他句子的有效引用掩盖当前句缺少来源的问题。
             for marker in re.findall(r"\[([^\[\]\n]+)\]", sentence):
-                if _is_numeric_interval_marker(marker):
+                if _is_non_citation_marker(marker):
                     continue
                 for paper_id in re.split(r"[,;，；]\s*", marker):
                     if not any(
@@ -527,7 +533,22 @@ class WritingAgent(BaseAgent):
                 "warnings": [*list(state.get("warnings") or []), f"审查模型调用失败：{raw_output}"],
             }
 
-        parsed = _extract_json_object(raw_output) or {}
+        parsed = _extract_json_object(raw_output)
+        # 中文说明：格式错误不是模型对正文作出的否定。必须明确保留未验证状态，
+        # 避免空建议触发反复改写，也不能把字符串 "true" 当成真正的通过。
+        if (not isinstance(parsed, dict) or type(parsed.get("passed")) is not bool
+                or not isinstance(parsed.get("suggestions"), list)
+                or any(not isinstance(item, str) or not item.strip() for item in parsed["suggestions"])
+                or not isinstance(parsed.get("message"), str) or not parsed["message"].strip()
+                or (parsed["passed"] and parsed["suggestions"])
+                or (not parsed["passed"] and not parsed["suggestions"])):
+            return {
+                **state,
+                "raw_model_outputs": raw_outputs,
+                "review": {"passed": False, "status": "unverified", "suggestions": [],
+                           "message": "审查模型返回格式不合法，正文未验证；原始回复已保存。"},
+                "completed": True,
+            }
         passed = parsed.get("passed") is True
         suggestions = _string_list(parsed.get("suggestions"))
         if passed or int(state.get("revision_count") or 0) >= self.max_revision_rounds:
@@ -795,7 +816,7 @@ def _text_cites_paper(text: str, paper_id: str) -> bool:
     return any(
         value.strip().casefold() == expected
         for marker in re.findall(r"\[([^\[\]\n]+)\]", str(text or ""))
-        if not _is_numeric_interval_marker(marker)
+        if not _is_non_citation_marker(marker)
         for value in re.split(r"[,;，；]\s*", marker)
     )
 
@@ -807,6 +828,15 @@ def _is_numeric_interval_marker(marker: str) -> bool:
     # 数值区间，不是第 0 与第 2 篇论文。只跳过这类明确从 0
     # 开始的双端数字区间，其余未知方括号仍按无效引用拦截。
     return bool(re.fullmatch(r"\s*0(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*", marker))
+
+
+def _is_non_citation_marker(marker: str) -> bool:
+    """仅排除明确的数字区间和 BERT 特殊标记，不放行未知论文编号。"""
+
+    # 中文说明：DPR 原文中的 [CLS] 是输入标记，不是参考文献。写作与独立
+    # 核查统一排除这五种明确标记；它们也不能满足事实句必须有引用的要求。
+    # 不按“纯字母”整体跳过，保留 [P1] 和未知编号的严格来源检查。
+    return _is_numeric_interval_marker(marker) or marker.strip() in {"CLS", "SEP", "MASK", "PAD", "UNK"}
 
 
 def _build_chunk_to_paper_map(payloads: list[Any], *, cache_dir: Path) -> dict[str, str]:
@@ -1476,7 +1506,7 @@ def _paper_ids_from_any(value: Any) -> list[str]:
             found.extend(_paper_ids_from_any(item))
     elif isinstance(value, str):
         found.extend(_clean_paper_id_candidate(match) for match in re.findall(r"\[([^\[\]]+)\]", value)
-                     if match.strip() and not _is_numeric_interval_marker(match))
+                     if match.strip() and not _is_non_citation_marker(match))
     return _deduplicate_strings(found)
 
 

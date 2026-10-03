@@ -8,7 +8,7 @@ from typing import Any
 
 from src.agents.base import AgentContext, AgentSpec, BaseAgent
 from src.agents.analyseAgent import _extract_json_object
-from src.agents.writingAgent import _citation_sentences, _is_numeric_interval_marker
+from src.agents.writingAgent import _citation_sentences, _is_non_citation_marker
 from src.retrieval.hybrid import bm25_rank
 from src.utils.read_utils.chunkers import TextChunk
 
@@ -72,7 +72,7 @@ class CitationAuditAgent(BaseAgent):
             cited: set[str] = set()
             invalid = False
             for marker in re.findall(r"\[([^\[\]\n]+)\]", unit):
-                if _is_numeric_interval_marker(marker):
+                if _is_non_citation_marker(marker):
                     continue
                 ids = [marker] if marker in by_id or canonical(marker) else re.split(r"[,;，；]\s*", marker)
                 for raw in ids:
