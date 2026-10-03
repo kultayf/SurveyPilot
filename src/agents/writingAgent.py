@@ -476,7 +476,10 @@ class WritingAgent(BaseAgent):
                 not _is_non_citation_marker(marker)
                 for marker in re.findall(r"\[([^\[\]\n]+)\]", sentence)
             ):
-                problems.append(f"事实或分析句“{sentence[:40]}”缺少逐句引用。")
+                # 中文说明：范围说明应在摘要交代，不需要原论文为作者的写作选择作证。
+                # 对无引用句明确给出删除范围说明这一整改路径，避免模型反复保留它，
+                # 或为了过关给它添加不相关引用；论文事实仍必须绑定真实原文。
+                problems.append(f"事实或分析句“{sentence[:40]}”缺少逐句引用。若仅为本文结构或写作范围说明，请从本节正文删除，范围由摘要统一交代，不要补造引用；若含论文事实或比较，须逐句绑定真实原文。")
             # 方括号本身不能证明引用有效；逐个编号核对本句的真实证据，防止未知编号
             # 或其他句子的有效引用掩盖当前句缺少来源的问题。
             for marker in re.findall(r"\[([^\[\]\n]+)\]", sentence):
