@@ -19,10 +19,20 @@ ANALYSIS_VERSION = "3.0"
 # 全局综合分析不能用普通文字兜底。这里保留一次额外尝试，避免偶发的模型格式问题
 # 直接让本次任务失败；如果两次都不是合法 JSON，就让工作流明确中止。
 OVERALL_ANALYSIS_MAX_ATTEMPTS = 2
+OVERALL_ANALYSIS_FIELDS = (
+    "领域整体研究概况", "领域全域共性研究共识", "领域核心研究争议与矛盾体系",
+    "领域系统性研究空白与局限", "领域研究时序演化脉络", "领域技术与研究方法迭代脉络",
+    "各子主题横向差异对比分析", "领域整体总结与研究展望",
+)
 
 
 class OverallAnalysisError(RuntimeError):
     """全局综合分析没有得到可继续写作的合法 JSON。"""
+
+    def __init__(self, message: str, attempts: list[JsonObject] | None = None):
+        # 中文说明：失败不能丢掉两次实际回复，否则下一次只能猜测为何失败。
+        super().__init__(message)
+        self.attempts = list(attempts or [])
 
 
 def run_analyse_node():
@@ -141,6 +151,21 @@ def run_analyse_node():
                     usage_callback=report_overall_usage,
                 )
             except OverallAnalysisError as exc:
+                # 中文说明：保存真实输入摘要、原始回复及用量，但明确标记失败，
+                # 不补造八个字段，也不把这个诊断产物送入后续写作。
+                failed_report = {
+                    "analysis_version": ANALYSIS_VERSION,
+                    "topic": request.topic,
+                    "subtopic_analyses": subtopic_analyses,
+                    "overall_analysis": {},
+                    "execution_metadata": {"status": "failed", "model_used": model_used,
+                                           "created_at": utc_now(), "message": str(exc),
+                                           "attempt_count": len(exc.attempts)},
+                    "diagnostics": {"attempts": exc.attempts},
+                }
+                failed_ref = await _persist_report_if_possible(state, failed_report)
+                if failed_ref and reporter is not None:
+                    reporter.artifact(failed_ref, stage="analysis_failed_artifact_ready")
                 # 中文说明：综合分析失败时把同一张综合卡片更新为失败，随后重新抛出异常。
                 # 这样会阻止后续写作节点，也不会留下看起来像正常结果的 fallback 报告。
                 if reporter is not None:
@@ -202,14 +227,26 @@ async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agen
     """
 
     last_reason = "模型没有返回可解析的 JSON"
+    attempts: list[JsonObject] = []
     for attempt in range(1, OVERALL_ANALYSIS_MAX_ATTEMPTS + 1):
         result = await agent.async_analyse_overall(
             topic=topic,
             subtopic_analyses=subtopic_analyses,
             usage_callback=usage_callback,
         )
+        # 中文说明：只解析出一个字典还不够；八个字段必须完整且都是非空文字。
+        # 缺字段时不能自动补上泛泛的分析，更不能给补写内容随便贴论文编号。
+        valid_fields = (result.parsed is not None
+                        and set(result.parsed) == set(OVERALL_ANALYSIS_FIELDS)
+                        and all(isinstance(result.parsed[field], str) and result.parsed[field].strip()
+                                for field in OVERALL_ANALYSIS_FIELDS))
+        if valid_fields:
+            return _normalize_overall_analysis(result.parsed)
         if result.parsed is not None:
-            return _normalize_overall_analysis(result.parsed, subtopic_analyses)
+            result.reason = "综合分析必须完整返回八个非空字符串字段"
+        attempts.append({"attempt": attempt, "raw_model_output": result.raw_model_output,
+                         "reason": result.reason, "request_failed": result.request_failed,
+                         "finish_reason": result.finish_reason, "usage": result.usage})
 
         # 中文说明：模型调用本身已经由 provider 负责网络重试；这里的重试针对的是
         # “请求成功但返回内容不是 JSON”这一业务层问题。两次都失败时必须中止，不能 fallback。
@@ -222,7 +259,7 @@ async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agen
 
     raise OverallAnalysisError(
         f"全局分析未返回合法 JSON，已尝试 {attempt} 次（含 "
-        f"{attempt - 1} 次重试），任务已中止：{last_reason}"
+        f"{attempt - 1} 次重试），任务已中止：{last_reason}", attempts=attempts,
     )
 
 
@@ -374,28 +411,12 @@ def _fallback_overall_analysis(topic: str, subtopic_analyses: list[JsonObject], 
     }
 
 
-def _normalize_overall_analysis(parsed: JsonObject, subtopic_analyses: list[JsonObject]) -> JsonObject:
-    """整理模型返回的八部分综合结果，并保证每段文字带有论文引用。"""
+def _normalize_overall_analysis(parsed: JsonObject) -> JsonObject:
+    """保留已经通过完整字段检查的模型文字，不自动补分析或添加引用。"""
 
-    paper_ids = _paper_ids_from_analyses(subtopic_analyses)
-    fallback = _fallback_overall_analysis("当前研究领域", subtopic_analyses, reason="")
-    fields = (
-        "领域整体研究概况",
-        "领域全域共性研究共识",
-        "领域核心研究争议与矛盾体系",
-        "领域系统性研究空白与局限",
-        "领域研究时序演化脉络",
-        "领域技术与研究方法迭代脉络",
-        "各子主题横向差异对比分析",
-        "领域整体总结与研究展望",
-    )
-    normalized: JsonObject = {
-        # 中文说明：这八个字段是综合分析专用结构，不再复用子主题的六个分析字段。
-        # 每个字段都是可以直接渲染 Markdown 的文字，并补上可追溯的 [paperId] 引用。
-        field: _text_with_citation(parsed.get(field) or fallback[field], paper_ids)
-        for field in fields
-    }
-    return normalized
+    # 中文说明：原文是否支持这些模型判断仍须后续核查；这里不能用自动添加
+    # 的论文编号把未核实的文字装扮成已有来源的结论。
+    return {field: parsed[field].strip() for field in OVERALL_ANALYSIS_FIELDS}
 
 
 def _build_final_report(

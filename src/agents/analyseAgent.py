@@ -27,6 +27,9 @@ class AnalyseModelResult:
     raw_model_output: str = ""
     reason: str = ""
     request_failed: bool = False
+    # 中文说明：保留服务端的结束原因和用量，才能区分正文截断与真正的格式错误。
+    finish_reason: str | None = None
+    usage: JsonObject | None = None
 
 
 class AnalyseAgent(BaseAgent):
@@ -130,16 +133,21 @@ def _parse_response(response: Any) -> AnalyseModelResult:
     """把模型响应解析为 JSON。"""
 
     raw_model_output = str(getattr(response, "content", "") or "")
+    response_details = {
+        "finish_reason": getattr(response, "finish_reason", None),
+        "usage": getattr(response, "usage", None),
+    }
     if not getattr(response, "ok", False):
         return AnalyseModelResult(
             raw_model_output=raw_model_output,
             reason=raw_model_output or str(getattr(response, "error_kind", "") or "分析模型调用失败"),
             request_failed=True,
+            **response_details,
         )
     parsed = _extract_json_object(raw_model_output)
     if parsed is None:
-        return AnalyseModelResult(raw_model_output=raw_model_output, reason="模型没有返回可解析的 JSON")
-    return AnalyseModelResult(parsed=parsed, raw_model_output=raw_model_output)
+        return AnalyseModelResult(raw_model_output=raw_model_output, reason="模型没有返回可解析的 JSON", **response_details)
+    return AnalyseModelResult(parsed=parsed, raw_model_output=raw_model_output, **response_details)
 
 
 def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
