@@ -6,11 +6,26 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from src.paper_retrieval.models import PaperDocument
 
 
 JsonObject = dict[str, Any]
+
+
+def is_arxiv_abstract_page(source_url: str | None, content: bytes = b"") -> bool:
+    """识别 arXiv 的摘要和下载导航页，不能把这类页面当作论文全文。"""
+
+    # 中文说明：第51轮的 GraphSAGE 下载到了 /abs/ 页面，里面只有摘要、
+    # 下载按钮和网站导航，却被旧逻辑切成16段当成全文。地址和页面自身的
+    # 标记都要检查：旧缓存可能没有来源地址，跳转也可能改变原来的地址。
+    parsed = urlparse(source_url or "")
+    if parsed.hostname in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"} and parsed.path.startswith("/abs/"):
+        return True
+    lowered = content.lower()
+    return (b"citation_arxiv_id" in lowered and b"submission-history" in lowered
+            and b"abstract mathjax" in lowered)
 
 
 def text_sha256(text: str) -> str:

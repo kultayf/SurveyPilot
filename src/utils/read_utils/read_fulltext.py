@@ -12,7 +12,7 @@ from pathlib import Path
 
 from src.paper_retrieval.models import PaperDocument
 from src.utils.read_utils.pdf_parsers import get_pdf_parser
-from src.utils.read_utils.cache import text_sha256, write_text_atomic, file_sha256
+from src.utils.read_utils.cache import is_arxiv_abstract_page, text_sha256, write_text_atomic, file_sha256
 
 
 _UNSUPPORTED_FULLTEXT_WARNING = "暂不支持该全文文件格式"
@@ -84,6 +84,14 @@ def _convert_with_cache(paper: PaperDocument, source_path: Path, source_url: str
     markdown_path = _markdown_output_path(source_path)
     manifest_path = source_path.parent / "parse_manifest.json"
     suffix = source_path.suffix.lower()
+    # 中文说明：在复用解析结果之前检查原始HTML，避免旧摘要页的 paper.md 和
+    # parse_manifest 继续被认作有效全文。这个拒绝只返回提醒，不改写旧缓存。
+    if suffix in {".html", ".htm"}:
+        try:
+            if is_arxiv_abstract_page(source_url, source_path.read_bytes()):
+                return MarkdownConversion(warnings=["arXiv 摘要页不是论文全文，请获取 PDF 或完整 HTML 正文"])
+        except OSError as exc:
+            return MarkdownConversion(warnings=[f"HTML 正文读取失败：{exc}"])
     try:
         parser_version = version(parser_name) if suffix == ".pdf" else "builtin-html-1"
     except PackageNotFoundError:

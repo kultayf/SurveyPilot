@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 from src.paper_retrieval.models import PaperDocument
-from src.utils.read_utils.cache import paper_cache_dir, read_cached_source_url, write_metadata
+from src.utils.read_utils.cache import is_arxiv_abstract_page, paper_cache_dir, read_cached_source_url, write_metadata
 
 
 _DOWNLOAD_SEMAPHORE = asyncio.Semaphore(4)
@@ -82,6 +82,11 @@ async def async_download_paper_fulltext(
 
     paper_dir = paper_cache_dir(cache_dir, paper)
     cached = _find_cached_file(paper_dir)
+    # 中文说明：已有文件不一定是全文。保留旧摘要页供排查，但不复用它；
+    # 重新尝试真正的全文地址，后续仍遵守最多三个地址的下载上限。
+    if cached is not None and cached.suffix.lower() in {".html", ".htm"}:
+        if is_arxiv_abstract_page(read_cached_source_url(paper_dir), cached.read_bytes()):
+            cached = None
     if cached is not None:
         return DownloadedPaper(
             status="downloaded",
@@ -147,6 +152,11 @@ async def async_download_paper_fulltext(
                         if candidate_kind is None:
                             failures.append(f"{host}：内容不是可读取的 PDF 或 HTML")
                             continue
+                        # 中文说明：收到200和HTML只证明网页能打开，不证明拿到论文。
+                        # 若服务把PDF请求跳转回摘要页，也必须拒绝，不能送去全文索引。
+                        if candidate_kind == "html" and is_arxiv_abstract_page(candidate_url, candidate_content):
+                            failures.append(f"{host}：返回的是 arXiv 摘要页，不是论文全文")
+                            continue
                         content = candidate_content
                         content_kind = candidate_kind
                         content_type = candidate_type
@@ -196,6 +206,11 @@ def _find_fulltext_urls(paper: PaperDocument) -> list[str]:
         if isinstance(value, dict):
             value = value.get("url")
         text = str(value).strip() if value is not None else ""
+        # 中文说明：arXiv 的 /abs/ 是摘要页；同一编号的 /pdf/ 才是全文。
+        # 只替换已知 arXiv 地址，不猜测其他出版社链接，也不增加重试数量。
+        if text and is_arxiv_abstract_page(text):
+            parsed = urlparse(text)
+            text = parsed._replace(path="/pdf/" + parsed.path.removeprefix("/abs/"), query="", fragment="").geturl()
         if text and text not in urls:
             urls.append(text)
     return urls
