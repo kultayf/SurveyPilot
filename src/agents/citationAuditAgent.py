@@ -174,7 +174,14 @@ class CitationAuditAgent(BaseAgent):
                                 and canonical(by_id[chunk_id].paperId) == paper_id):
                             peer_matches.append((overlap, chunk_id))
                 if peer_matches:
-                    peer_candidate_ids.append(max(peer_matches, key=lambda item: item[0])[1])
+                    # 中文说明：摘要一句可能概括正文同篇论文的两个不同操作。
+                    # 真实 GIN 摘要前半句对应多重集、后半句对应节点更新，旧代码
+                    # 只给一个正文来源，更新定义被挤掉。最多取两条不同的已绑定
+                    # 原文作为候选；总候选和输入预算不变，仍由模型独立核查。
+                    matching_ids = list(dict.fromkeys(
+                        chunk_id for _, chunk_id in sorted(peer_matches, key=lambda item: -item[0])
+                    ))
+                    peer_candidate_ids.extend(matching_ids[:2])
                 # 中文说明：阅读阶段的编号可能先列摘要、引言，再列方法章。
                 # 优先选择标题不像摘要/引言/实验的原文切片作为第二候选；
                 # 如果没有这种切片，再按原顺序给候选，不能猜测不存在的编号。

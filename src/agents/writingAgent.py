@@ -518,38 +518,57 @@ class WritingAgent(BaseAgent):
                 "generation_failed": False,
             }
 
-        try:
-            response = await asyncio.wait_for(self.context.llm.provider.chat(
-                _review_messages(state, located), temperature=0, max_tokens=2048,
-            ), timeout=WRITE_CALL_TIMEOUT_SECONDS)
-        except Exception as exc:
-            return _stop_writing(state, f"审查模型未按时完成：{type(exc).__name__}")
-        state = _record_section_usage(state, response)
-        raw_output = str(getattr(response, "content", "") or "")
-        raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
-        if not response.ok:
+        # 中文说明：第 52 轮审查回复在数组后多了一个引号，不能据此判正文通过，
+        # 也不应让作者反复重写同一篇正文。仅格式不合格时，允许审查模型再看
+        # 同一份正文和原文一次；不自动修补回复，不传入希望得到的通过结论。
+        # 两次原始回复与用量都保留，且共用本节原有时间和用量上限。
+        parsed = None
+        for format_attempt in range(2):
+            if _section_budget_exhausted(state):
+                return _stop_writing(state, "本小节达到预算，审查格式仍未验证")
+            messages = _review_messages(state, located)
+            if format_attempt:
+                messages[0]["content"] += (
+                    "\n上一份回复未符合 JSON 格式要求。请重新独立审查同一草稿，"
+                    "不改变检查标准，只返回 passed（布尔值）、suggestions（字符串数组）、"
+                    "message（非空字符串）三个字段。所有实质问题仍须保留，"
+                    "不通过时至少一条具体建议；通过时建议为空。检查引号与数组括号。"
+                )
+            remaining_seconds = SECTION_TIME_BUDGET_SECONDS - (
+                time.monotonic() - float(state.get("started_at") or time.monotonic())
+            )
+            try:
+                response = await asyncio.wait_for(self.context.llm.provider.chat(
+                    messages, temperature=0, max_tokens=2048,
+                ), timeout=min(WRITE_CALL_TIMEOUT_SECONDS, remaining_seconds))
+            except Exception as exc:
+                # 调用失败或超时不另开格式重试；已有回复仍在 state 中，不丢证据。
+                return _stop_writing(state, f"审查模型未按时完成：{type(exc).__name__}")
+            state = _record_section_usage(state, response)
+            raw_output = str(getattr(response, "content", "") or "")
+            state = {**state, "raw_model_outputs": [*list(state.get("raw_model_outputs") or []), raw_output]}
+            if not response.ok:
+                return {
+                    **state,
+                    "review": {"passed": False, "status": "unverified", "suggestions": [], "message": "审查模型调用失败，正文未验证。"},
+                    "completed": True,
+                    "warnings": [*list(state.get("warnings") or []), f"审查模型调用失败：{raw_output}"],
+                }
+            parsed = _extract_json_object(raw_output)
+            # 不能把字符串 "true" 当成通过，也不能把空整改建议当成有效否定。
+            if (isinstance(parsed, dict) and set(parsed) == {"passed", "suggestions", "message"}
+                    and type(parsed.get("passed")) is bool
+                    and isinstance(parsed.get("suggestions"), list)
+                    and all(isinstance(item, str) and item.strip() for item in parsed["suggestions"])
+                    and isinstance(parsed.get("message"), str) and parsed["message"].strip()
+                    and (not parsed["suggestions"] if parsed["passed"] else bool(parsed["suggestions"]))):
+                break
+            parsed = None
+        if parsed is None:
             return {
                 **state,
-                "raw_model_outputs": raw_outputs,
-                "review": {"passed": False, "status": "unverified", "suggestions": [], "message": "审查模型调用失败，正文未验证。"},
-                "completed": True,
-                "warnings": [*list(state.get("warnings") or []), f"审查模型调用失败：{raw_output}"],
-            }
-
-        parsed = _extract_json_object(raw_output)
-        # 中文说明：格式错误不是模型对正文作出的否定。必须明确保留未验证状态，
-        # 避免空建议触发反复改写，也不能把字符串 "true" 当成真正的通过。
-        if (not isinstance(parsed, dict) or type(parsed.get("passed")) is not bool
-                or not isinstance(parsed.get("suggestions"), list)
-                or any(not isinstance(item, str) or not item.strip() for item in parsed["suggestions"])
-                or not isinstance(parsed.get("message"), str) or not parsed["message"].strip()
-                or (parsed["passed"] and parsed["suggestions"])
-                or (not parsed["passed"] and not parsed["suggestions"])):
-            return {
-                **state,
-                "raw_model_outputs": raw_outputs,
                 "review": {"passed": False, "status": "unverified", "suggestions": [],
-                           "message": "审查模型返回格式不合法，正文未验证；原始回复已保存。"},
+                           "message": "审查模型两次返回格式不合法，正文未验证；原始回复已保存。"},
                 "completed": True,
             }
         passed = parsed.get("passed") is True
@@ -558,13 +577,11 @@ class WritingAgent(BaseAgent):
             message = str(parsed.get("message") or ("审查通过" if passed else "修改次数已达到上限，保留当前正文")).strip()
             return {
                 **state,
-                "raw_model_outputs": raw_outputs,
                 "review": {"passed": passed, "suggestions": suggestions, "message": message},
                 "completed": True,
             }
         return {
             **state,
-            "raw_model_outputs": raw_outputs,
             "review": {"passed": False, "suggestions": suggestions, "message": str(parsed.get("message") or "")},
             "revision_suggestions": suggestions,
             "revision_count": int(state.get("revision_count") or 0) + 1,
@@ -1083,7 +1100,7 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
             "可用工具": [
                 "get_extraction(List[paperId])：获取论文结构化摘要",
                 "search_section(List[{paperId, List[chunkId]}])：按 chunkId 获取论文原文片段",
-                "get_chunk_by_embed(query, paper_ids=None)：在当前会话论文中混合检索，返回原文、页码、父级上下文和实际检索方式；不传 paper_ids 时检索当前会话全部可用全文",
+                "get_chunk_by_embed(query, paper_ids=None)：按现用配置检索当前会话全文，返回原文、页码、父级上下文和实际检索方式；单论文任务应传该论文真实 paper_ids，不传时检索当前会话全部可用全文",
             ],
         },
         ensure_ascii=False,
@@ -1148,11 +1165,16 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
             if not isinstance(record, dict):
                 continue
             snippets = []
-            for chunk in (record.get("chunks") or [])[:2]:
+            # 中文说明：单论文任务曾请求到操作定义，却被“每篇只看两段”丢掉。
+            # 单论文最多展示八段已返回原文；多论文仍每篇两段，不加工具额度。
+            snippet_limit = 8 if len(item["result"]) == 1 else 2
+            for chunk in (record.get("chunks") or [])[:snippet_limit]:
                 if not isinstance(chunk, dict):
                     continue
                 snippets.append({"chunkId": chunk.get("chunkId"),
                                  "section": chunk.get("section"),
+                                 # 相邻编号来自真实切片，便于接着核对定义，不能猜后缀。
+                                 "next_chunk_id": chunk.get("next_chunk_id"),
                                  "page_start": chunk.get("page_start"),
                                  "page_end": chunk.get("page_end"),
                                  # 中文说明：第 32 轮 CoaT 的方法定义在同一真实
@@ -1173,16 +1195,25 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
         return _compact_text(item, max_chars=6000)
     shown: list[JsonObject] = []
     per_paper: dict[str, int] = {}
+    # 中文说明：检索返回的第八段包含真实更新定义，旧提示却只给作者前两段。
+    # 不改变检索结果或排序，只让单论文任务看到本次已取得的最多八段原文。
+    source_papers = {str(chunk.get("paperId") or "").casefold()
+                     for chunk in payload["chunks"] if isinstance(chunk, dict) and chunk.get("paperId")}
+    snippet_limit = 8 if len(source_papers) == 1 else 2
     for chunk in payload["chunks"]:
         if not isinstance(chunk, dict):
             continue
         paper_id = str(chunk.get("paperId") or "").strip()
         chunk_id = str(chunk.get("chunkId") or "").strip()
-        if not paper_id or not chunk_id or per_paper.get(paper_id.casefold(), 0) >= 2:
+        if not paper_id or not chunk_id or per_paper.get(paper_id.casefold(), 0) >= snippet_limit:
             continue
         shown.append({
             "paperId": paper_id,
             "chunkId": chunk_id,
+            # 中文说明：第 52 轮的定义分散在连续子片段中。保留真实章节和
+            # 下一段编号，让作者能选择继续查定义，而不是重复打开同一引理。
+            "section": chunk.get("section"),
+            "next_chunk_id": chunk.get("next_chunk_id"),
             "page_start": chunk.get("page_start"),
             "page_end": chunk.get("page_end"),
             "content": str(chunk.get("content") or "")[:1200],
@@ -1444,6 +1475,8 @@ def _chunk_to_markdown(chunk: TextChunk) -> JsonObject:
         "section": chunk.section,
         "parent_chunk_id": chunk.parent_chunk_id,
         "parent_content": chunk.parent_content,
+        # 编号来自切片文件本身，方便在第二次工具机会核对相邻定义。
+        "next_chunk_id": chunk.next_chunk_id,
     }
 
 
