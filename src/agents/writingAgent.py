@@ -450,7 +450,8 @@ class WritingAgent(BaseAgent):
         if target_words > 0 and actual_words > int(target_words * 1.3):
             problems.append(
                 f"正文约 {actual_words} 字/词，超过计划的 {target_words} 字/词；"
-                "请保留任务必需的数字、条件和逐句引用，压缩至目标字数附近。"
+                "请保留用户要求的数字、条件、论文覆盖及逐句引用，删除重复说明和用户未要求的公式或背景，"
+                "用精炼文字压缩至目标字数附近；不要靠删除必需论文或证据绑定缩短。"
             )
         for sentence in _citation_sentences(located["content"]):
             # 中文说明：仅看到少量片段，不能证明整篇原论文没有某项结果。前两次
@@ -1076,7 +1077,10 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     # 的线索，不会改写本地原文，最终引用仍必须通过逐句证据审计。
     evidence = [{"field": str(item.get("field") or item.get("全局分析字段") or ""),
                  "content": _compact_text(item.get("content") or item.get("内容") or "",
-                                          max_chars=4000 if item.get("field") == "实证矩阵的原文位置（不是事实结论）" else 1800)}
+                                          max_chars=4000 if item.get("field") in {
+                                              "实证矩阵的原文位置（不是事实结论）",
+                                              "前置小节已定位原文的入口（不是事实结论）",
+                                          } else 1800)}
                 for item in (state.get("evidence_map") or []) if isinstance(item, dict)][:5]
     previous = [{"section_id": item.get("section_id"),
                  "content": _compact_text(item.get("content") or "", max_chars=1000)}

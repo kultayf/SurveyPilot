@@ -227,7 +227,24 @@ def run_writing_node():
             task_text += "\n写作范围：只回答用户要求中与本小节标题对应的问题。大纲任务细节和前文均未通过原文核查，不得补入未要求的方法痛点、效率、硬件或研究空白。每句论文事实先查原文，证据不支持就删去；已索引原文是否缺少某数字须检查实验章节、表格与附录，未查全不得断言不存在。"
             comparison_title = str(section_task.get("section_title") or "")
             is_comparison = any(word in comparison_title for word in ("比较", "对比", "综合", "差异", "对照"))
+            if is_comparison:
+                # 中文说明：前面的小节已经打开过方法原文，但比较节过去只拿到
+                # 空的前文，重新检索两篇后就耗尽机会。这里传真实原文的位置与
+                # 短开头，不传作者写的结论；比较作者仍须用工具重新打开、核对。
+                # 中文说明：本节只点名部分论文时，也只传这些论文的入口，
+                # 不能因为前面读过更多论文就扩张当前比较的范围。
+                comparison_paper_ids = [paper_id for paper_id in available_paper_ids
+                                        if not selected_paper_ids or paper_id.casefold() in selected_paper_ids]
+                source_locations = _previous_source_locations(written_sections, comparison_paper_ids)
+                if source_locations:
+                    section_evidence.insert(0, {"field": "前置小节已定位原文的入口（不是事实结论）",
+                                                "content": json.dumps(source_locations, ensure_ascii=False)})
+                    task_text += "\n比较取证：先检查前置小节已定位原文的入口，优先用一次 search_section 批量打开本节相关各篇的方法原文，每篇挑选直接描述所需操作的切片；不要把两次机会分别耗在前两篇。第二次工具用于补齐尚缺的定义。入口的短开头和前文都不能代替工具原文，实验或背景段落也不能代替方法定义。"
             if brief_mechanism:
+                # 中文说明：用户明确不要复杂公式时，即使公式原文已找到也不应
+                # 整段抄进简明机制说明。只限制这一明确请求，不影响用户要推导的任务。
+                if re.search(r"(?:不(?:要)?(?:扩写|展开|写)|避免)(?:[^，。；;\n]{0,40}、)?复杂公式", topic_text):
+                    task_text += "\n用户明确不要复杂公式：用普通文字说明实际操作，不抄写传播方程、求和下标、变量定义或引理公式。原文公式可用于核对操作，但不是本节必须复述的内容；不能因其有证据就越过用户范围。"
                 # 中文说明：“不同任务不直接排名”是整篇综述的写作边界，不是每篇
                 # 原论文自己做出的结论。单论文节只讲指定机制；比较节也不能把
                 # 作者的写作选择伪装成有原文引用的科研发现。
@@ -242,6 +259,9 @@ def run_writing_node():
                 if "只写" in topic_text and "操作" in topic_text:
                     task_text += "\n用户限定只写操作：必须说明方法实际对哪些输入执行什么操作，先定位原论文的方法定义。表达能力、判别能力或单射性必要条件不是操作步骤，不能只用这些理论性质代替聚合或消息传递的具体操作。找不到直接操作原文时标为待核查，不靠背景或性质填满小节。"
                 if is_comparison:
+                    # 中文说明：真实比较稿先列五篇再总结同样五点，导致超长后
+                    # 反复重写。这里要求直接写对照，不靠删掉必需论文缩短篇幅。
+                    task_text += "\n本节直接写机制的连贯对照，不要先逐篇重复五段说明、末尾再总结同样五点。用几句简短对照覆盖各篇，每句只比较确有原文支持的设计；一句涉及多篇时，evidence须为该完整事实句逐篇给出对应原文绑定，不能只绑定第一篇。压缩重复内容，不删掉必需论文。"
                     # 中文说明：写作范围由摘要交代，不能在这里另要求作者写一条
                     # 没有论文来源的范围句，否则会与逐句引用检查互相冲突。
                     # 也不能把“不作性能排名”改写成原论文证明任务绝对不可比较。
@@ -654,6 +674,38 @@ def _flatten_outline(outline: JsonObject) -> list[JsonObject]:
                 }
             )
     return tasks
+
+
+def _previous_source_locations(sections: list[JsonObject], allowed_paper_ids: list[str]) -> list[JsonObject]:
+    """收集前面小节实际找到的原文位置，不转发模型写出的事实句。"""
+
+    allowed = {value.casefold() for value in allowed_paper_ids}
+    papers: dict[str, JsonObject] = {}
+    seen: set[str] = set()
+    for section in sections:
+        for binding in section.get("citation_evidence") or []:
+            if not isinstance(binding, dict) or binding.get("status") != "source_located":
+                continue
+            paper_id = str(binding.get("paperId") or "")
+            if paper_id.casefold() not in allowed:
+                continue
+            for chunk in binding.get("chunks") or []:
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_id = str(chunk.get("chunkId") or "")
+                # 中文说明：只接收已经由原文工具定位、且归属同一论文的编号。
+                # 未定位的模型绑定、错误归属和重复编号不能变成新证据入口。
+                if (not chunk_id or chunk_id in seen or chunk.get("paperId") != paper_id
+                        or not chunk_id.casefold().startswith(paper_id.casefold() + ":")):
+                    continue
+                record = papers.setdefault(paper_id.casefold(), {"paperId": paper_id, "chunks": []})
+                if len(record["chunks"]) >= 4:
+                    continue
+                seen.add(chunk_id)
+                record["chunks"].append({"chunkId": chunk_id, "section": chunk.get("section"),
+                                         "page_start": chunk.get("page_start"),
+                                         "source_opening": str(chunk.get("content") or "")[:100]})
+    return list(papers.values())
 
 
 def _resolve_previous_sections(*, requested_refs: list[Any], written_sections: list[JsonObject]) -> list[JsonObject]:
