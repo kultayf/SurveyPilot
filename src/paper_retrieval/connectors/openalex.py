@@ -75,8 +75,15 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     def _params(self, request: SearchRequest) -> dict[str, str | int]:
         """构造 OpenAlex 请求参数，同步和异步入口共用。"""
 
+        # 中文说明：GIN 等论文的标题以问号结尾，这里把句末问号当作标题标点去掉，
+        # 保留全部查询词。否则 OpenAlex 会把它当成“必须还有一个字符”的通配符，
+        # 默认搜索返回400，改用精确搜索也可能找不到这篇原论文。
+        query = self._build_query(request).strip().removesuffix("?").rstrip()
+        # 中文说明：其余位置的 ? 和 * 仍保留为查询通配符；按接口要求使用
+        # search.exact。没有通配符的普通查询继续使用原来的 search 参数。
+        search_parameter = "search.exact" if any(char in query for char in "?*") else "search"
         params: dict[str, str | int] = {
-            "search": self._build_query(request),
+            search_parameter: query,
             "per-page": max(1, request.limit),
         }
         filters: list[str] = []
