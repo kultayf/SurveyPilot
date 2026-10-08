@@ -1357,7 +1357,9 @@ def _find_extraction_in_cache(paper_id: str, cache_dir: Path) -> JsonObject | No
         path = directory / "extraction.json"
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            # 中文说明：旧摘要文件可能因写入中断而损坏，连 UTF-8 文字也读不出来。
+            # 这种文件不能提供可信摘要，跳过后继续查找；不替换乱码、不补造内容。
             continue
         # 中文说明：目录名清理后可能重名，因此摘要文件本身的论文编号也必须
         # 属于已核对的元数据，不能把另一篇论文的摘要贴到当前论文名下。
@@ -1412,7 +1414,10 @@ def _cache_paper_aliases(directory: Path) -> set[str]:
     metadata_path = directory / "metadata.json"
     try:
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        # 中文说明：查找当前论文时会检查其他缓存。某份旧元数据无法解码，
+        # 就无法证明它属于哪篇论文，返回空编号集合将其排除；
+        # 不能让无关损坏文件中断整轮写作，也不能凭目录名认定论文归属。
         return set()
     if not isinstance(payload, dict):
         return set()

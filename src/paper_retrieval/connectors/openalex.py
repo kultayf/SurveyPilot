@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from ..models import PaperDocument, SearchRequest
 from .base import PaperSearchConnector
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAlexPaperConnector(PaperSearchConnector):
@@ -49,12 +53,19 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         resolved_client = client or httpx.AsyncClient(timeout=20.0)
         owns_client = client is None
         try:
-            response = await resolved_client.get(
-                self._endpoint,
-                params=self._params(request),
-                headers=self.headers,
-                timeout=20.0,
-            )
+            # 中文说明：第49轮某篇原论文在建立连接时超时，但此前独立检索成功。
+            # 只为这种尚未收到响应的连接超时补试一次，每次仍限20秒；
+            # 第二次失败继续交给上层记录。429、其他HTTP错误及读取超时不重试，
+            # 不把限流藏起来，也不因一篇缺失论文反复执行整个检索流程。
+            try:
+                response = await resolved_client.get(
+                    self._endpoint, params=self._params(request), headers=self.headers, timeout=20.0,
+                )
+            except httpx.ConnectTimeout:
+                logger.warning("OpenAlex建立连接超时，补试一次；再次失败将保留来源错误")
+                response = await resolved_client.get(
+                    self._endpoint, params=self._params(request), headers=self.headers, timeout=20.0,
+                )
         finally:
             if owns_client:
                 await resolved_client.aclose()
