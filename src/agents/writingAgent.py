@@ -982,13 +982,43 @@ async def get_chunk_by_embed(
 ) -> JsonObject:
     """在当前会话全文中执行 BM25 与向量检索，返回子片段和父级上下文。"""
 
-    return await async_search_chunks(
+    result = await async_search_chunks(
         query,
         read_results=[*list(read_results or []), *list(session_read_results or [])],
         cache_dir=cache_dir,
         paper_ids=paper_ids,
         top_k=top_k,
     )
+    # 中文说明：方法定义可能在命中片段之后两段。只给一个“下一段编号”时，
+    # 作者常再次全文检索，仍命中引理概述，用完两次机会却没打开实际更新定义。
+    # 给出同一父段中最多两条真实续段的位置和短开头，供下一次 search_section
+    # 批量核对；不猜编号、不跨论文/父段，也不把短开头当作事实已经有证据。
+    sources = await asyncio.to_thread(
+        load_scoped_chunks, Path(cache_dir),
+        [*list(read_results or []), *list(session_read_results or [])], paper_ids,
+    )
+    by_id = {chunk.chunk_id: chunk for chunk in sources}
+    for hit in result.get("chunks") or []:
+        current = by_id.get(str(hit.get("chunkId") or ""))
+        if current is None:
+            continue
+        locations = []
+        cursor = current
+        for _ in range(2):
+            following = by_id.get(cursor.next_chunk_id or "")
+            if (following is None or following.paperId != current.paperId
+                    or not current.parent_chunk_id
+                    or following.parent_chunk_id != current.parent_chunk_id):
+                break
+            locations.append({"chunkId": following.chunk_id,
+                              "section": following.section,
+                              "page_start": following.page_start,
+                              "page_end": following.page_end,
+                              "source_opening": following.content[:160]})
+            cursor = following
+        if locations:
+            hit["next_source_locations"] = locations
+    return result
 
 
 async def execute_writing_tool(
@@ -1218,6 +1248,8 @@ def _compact_writing_tool_result(item: JsonObject) -> str:
             # 下一段编号，让作者能选择继续查定义，而不是重复打开同一引理。
             "section": chunk.get("section"),
             "next_chunk_id": chunk.get("next_chunk_id"),
+            # 续段只是找原文的入口，下一次工具仍须按实际编号打开核对。
+            "next_source_locations": chunk.get("next_source_locations") or [],
             "page_start": chunk.get("page_start"),
             "page_end": chunk.get("page_end"),
             "content": str(chunk.get("content") or "")[:1200],

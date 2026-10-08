@@ -19,6 +19,18 @@ AUDIT_MAX_TOKENS = 8192
 AUDIT_TIMEOUT_SECONDS = 180
 
 
+def _quote_has_parse_risk(quote: str) -> bool:
+    """识别仍需对照 PDF 的缺字和表格引句，不清理或补造原文。"""
+    # 中文说明：逐字抄对解析文件不代表公式没有缺字、表格没有错列。
+    # 补问选项和最终检查使用同一个判断，避免补问再次选中不能放行的引句。
+    return "\ufffd" in quote or any(
+        ord(character) < 32 and character not in "\t\n\r" for character in quote
+    ) or any(
+        line.strip().startswith("|") and line.count("|") >= 3
+        for line in quote.splitlines()
+    )
+
+
 def audit_units(text: str) -> list[str]:
     """逐个事实句检查正文，令失败理由能准确指向该改写或删除的句子。"""
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
@@ -316,9 +328,9 @@ class CitationAuditAgent(BaseAgent):
                 # 中文说明：补问只是减少偶发遗漏，不是验收门禁；失败时
                 # 原本的 unverified 会原样保留。
                 pass
-        # 中文说明：模型可能语义判为支持，却在复制带 Markdown/公式的英文句子时
-        # 漏掉一个字符。只对“引句不能逐字定位”的原句补问一次，输入仍为同一
-        # 正文与同一批原文切片；补问结果还会走下方完整的逐字与引用归属校验。
+        # 中文说明：引句抄错时只补问一次；损坏公式不是抄写错误，不能靠
+        # 挑出附近的干净文字修好它，仍由末尾的严格检查判证据不足。
+        # 补问结果还会走完整的逐字与引用归属校验，不因再次询问就判为支持。
         # 补问失败时保留原结果，由硬门禁判不足，不能直接信任模型口头判断。
         for position, verdict in enumerate(verdicts):
             if not isinstance(verdict, dict) or verdict.get("status") != "supported":
@@ -329,8 +341,14 @@ class CitationAuditAgent(BaseAgent):
             raw_evidence = verdict.get("evidence")
             if not isinstance(raw_evidence, list) or not raw_evidence:
                 continue
+            # 原引句包含缺字、不可识别字符或表格时，必须换到真正清晰的原文
+            # 或改写主张；同一损坏公式周围的干净半句不能替代该公式作证。
+            if any(isinstance(source, dict) and _quote_has_parse_risk(str(source.get("quote") or ""))
+                   for source in raw_evidence):
+                continue
             if all(isinstance(source, dict) and
                    str(source.get("chunkId") or "") in candidate_maps[index] and
+                   len(str(source.get("quote") or "").strip()) >= 4 and
                    str(source.get("quote") or "").strip() in
                    candidate_maps[index][str(source.get("chunkId") or "")].content[:2400]
                    for source in raw_evidence):
@@ -338,10 +356,11 @@ class CitationAuditAgent(BaseAgent):
             retry_unit = next((item for item in payload if item["index"] == index), None)
             if retry_unit is None:
                 continue
-            # 中文说明：仅靠再次要求“逐字复制”仍可能把公式标记抄错。
-            # 从该句已有候选原文构造短的连续字串，模型必须先独立判断语义，
-            # 再选能覆盖全部事实的选项编号；程序按编号取回真实原字，最终仍
-            # 经过与普通引句完全相同的逐字和论文归属检查。选项不含乱码。
+            # 中文说明：不能把损坏公式前后的几个词切出来冒充完整证据。
+            # 旧的每十六词窗口曾留下“可分解为 φ”半句，让模型漏看求和缺字。
+            # 这里保留完整原句，含缺字、不可识别字符或表格的句子不作选项。
+            # 补问只看这些完整干净引句，不再读取损坏原段后凭记忆复原公式；
+            # 没有足以支持全部事实的选项仍判不足，最后的逐字与归属检查不变。
             quote_options = {}
             for source in raw_evidence:
                 if not isinstance(source, dict):
@@ -351,25 +370,26 @@ class CitationAuditAgent(BaseAgent):
                 if not chunk:
                     continue
                 source_text = chunk.content[:2400]
-                words = list(re.finditer(r"\S+", source_text))
-                for start in range(0, max(1, len(words) - 7), 8):
-                    if len(words) - start < 8:
-                        continue
-                    end = min(start + 16, len(words))
-                    quote = source_text[words[start].start():words[end - 1].end()]
-                    if "\ufffd" in quote or len(quote) > 220:
-                        continue
-                    option_id = f"q{len(quote_options)}"
-                    quote_options[option_id] = {"chunkId": chunk_id, "quote": quote}
+                for paragraph in re.split(r"\n\s*\n", source_text):
+                    for sentence in re.split(r"(?<=[.!?。！？])\s+", paragraph):
+                        quote = sentence.strip()
+                        # 原文切片的开头/结尾可能正好截在句中；尤其结尾没有
+                        # 句号的残句不能变成补问选项，避免重新出现半句假支持。
+                        if (_quote_has_parse_risk(quote) or not 8 <= len(quote) <= 1200
+                                or not re.search(r"[.!?。！？][*_\"'’”)]*$", quote)):
+                            continue
+                        option_id = f"q{len(quote_options)}"
+                        quote_options[option_id] = {"chunkId": chunk_id, "quote": quote}
             if not quote_options:
                 continue
             retry_messages = [{"role": "system", "content": messages[0]["content"] +
                               " 本次只在 supported 时返回 evidence:[{chunkId,quoteOptionId}]；"
                               "quoteOptionId 必须来自用户给出的 quote_options，需选择能共同支撑全部事实的片段；"
+                              "本次只有 quote_options 中的完整引句可作证据，不能推测被排除的公式。"
                               "不得因为有选项就推定事实受支持，不足仍判 insufficient。"},
                               {"role": "user", "content": json.dumps(
-                                  {"abstract": abstract, "units": [retry_unit], "quote_options": quote_options,
-                                   "note": "上一响应有引句无法逐字定位；请重新独立判断事实，再从原文连续片段中选编号。"},
+                                  {"abstract": abstract, "units": [{**retry_unit, "sources": []}], "quote_options": quote_options,
+                                   "note": "上一响应有引句无法逐字定位或含解析缺字/表格；请重新独立判断事实，再从干净的原文连续片段中选编号。没有直接支持全部事实的选项时仍判 insufficient，不重建损坏公式。"},
                                   ensure_ascii=False)}]
             try:
                 retry = await asyncio.wait_for(
@@ -440,9 +460,7 @@ class CitationAuditAgent(BaseAgent):
             reason = str(verdict.get("reason") or "")
             # 逐字匹配只能证明引句来自解析文件，不能证明 PDF 表格没有错列或丢小数点。
             # 真实抽查已发现此类错误；含缺字或表格行的证据先保留待核查，不能自动放行。
-            risky_quotes = any("\ufffd" in source["quote"] or any(
-                line.strip().startswith("|") and line.count("|") >= 3
-                for line in source["quote"].splitlines()) for source in verified_quotes)
+            risky_quotes = any(_quote_has_parse_risk(source["quote"]) for source in verified_quotes)
             if status == "supported" and risky_quotes:
                 status = "insufficient"
                 reason = "证据含解析表格或无法识别的字符，需对照原 PDF 核对列归属、数字与公式后再使用。模型说明：" + reason

@@ -97,11 +97,15 @@ def _convert_with_cache(paper: PaperDocument, source_path: Path, source_url: str
     except PackageNotFoundError:
         parser_version = "not-installed"
     try:
+        # 同页补充使用独立字体解码库；其版本也影响原文。依赖缺失时沿用
+        # 下方明确的解析失败提醒，不冒充已有完整解析，也不漏出未处理异常。
+        font_text_parser_version = version("pypdf") if suffix == ".pdf" and parser_name == "pymupdf4llm" else "not-used"
         source_hash = file_sha256(source_path)
-        # 中文说明：PDF 损坏页现在会带同页纯文本补充。旧缓存虽来自同一 PDF，
-        # 内容却缺少这份自动补充，所以提高版本号让下次阅读重新解析和切块。
-        expected = {"schema_version": 4, "source_hash": source_hash,
+        # 中文说明：旧的同页纯文本仍可能读错数学字体。提高版本号让新阅读
+        # 重新解析和切块；冻结验收旧产物保留，不把旧审计改写成通过。
+        expected = {"schema_version": 5, "source_hash": source_hash,
                     "parser": parser_name if suffix == ".pdf" else "html", "parser_version": parser_version,
+                    "font_text_parser_version": font_text_parser_version,
                     "artifacts_path": str(docling_artifacts_path or ""), "paperId": paper.paperId or paper.id,
                     "source_url": source_url, "title": paper.title}
         try:

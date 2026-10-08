@@ -11,6 +11,8 @@ dependencies = [
     "httpx>=0.28.0",
     "langgraph>=1.2.6",
     "openai>=2.43.0",
+    # 同页数学字体解码补充，不下载 OCR 或大模型权重。
+    "pypdf>=6.10.0,<7",
     "pymupdf4llm>=1.28.2,<2",
     "uvicorn>=0.35.0",
 ]

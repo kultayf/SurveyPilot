@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
+from src.agents.citationAuditAgent import _quote_has_parse_risk
 from src.agents.writingAgent import (
     WritingAgent,
     build_writing_agent,
@@ -300,13 +301,24 @@ def run_writing_node():
                 failed_units = [
                     {"status": unit.get("status"),
                      "claim": str(unit.get("claim") or "")[:400],
-                     "reason": str(unit.get("reason") or "")[:500]}
+                     "reason": str(unit.get("reason") or "")[:500],
+                     # 中文说明：只给笼统的“原文有缺字”时，作者仍会重新绑定
+                     # 同一个损坏公式。把被拒绝引句的真实编号告诉作者，让它
+                     # 换到清晰原句；编号只是错误位置，绝不作为通过证据。
+                     "unusable_quote_chunk_ids": list(dict.fromkeys(
+                         str(source.get("chunkId") or "")
+                         for source in unit.get("evidence") or []
+                         if isinstance(source, dict) and source.get("chunkId")
+                         and _quote_has_parse_risk(str(source.get("quote") or ""))
+                     ))}
                     for audit_section in (state.get("citation_audit") or {}).get("sections", [])
                     if audit_section.get("section_id") == section_task["section_id"]
                     for unit in audit_section.get("units", [])
                     if unit.get("status") != "supported"
                 ]
                 task_text += "\n独立核查要求：删除无法证实的事实或通过全文工具找到直接证据，不得仅降低语气掩盖错误。\n" + json.dumps(failed_units, ensure_ascii=False)
+                if any(unit["unusable_quote_chunk_ids"] for unit in failed_units):
+                    task_text += "\n上一版有因解析缺字、不可识别字符或表格被拒绝的引句，具体位置见 unusable_quote_chunk_ids。不要再次用这些损坏公式支持同一主张，也不要用公式旁边的通用理论说明代替公式。请用全文工具定位清晰完整的直接原句，或改写为原文普通文字确实说明的操作；找不到则保留待核查。用户只要求操作时，应找实际实现步骤，不把表达力证明中的通用函数分解当成最终模型的实施步骤。"
                 if prior and (prior.get("review") or {}).get("passed") is False:
                     # 中文说明：独立审计通过也不代表本地逐句引用检查通过。
                     # 重写时带上上一轮的具体建议，让模型知道需要修正哪里。

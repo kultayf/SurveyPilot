@@ -25,12 +25,19 @@ def _page_warnings(pages: list[ParsedPdfPage]) -> list[str]:
     """标出确定可见的缺字；没有告警也不代表公式与复杂表格已经人工核对。"""
     warnings = []
     empty = [str(page.page_number) for page in pages if not page.text.strip()]
-    damaged = [str(page.page_number) for page in pages if "\ufffd" in page.text]
+    damaged = [str(page.page_number) for page in pages if _has_unreadable_characters(page.text)]
     if empty:
         warnings.append("以下页面没有可读取文字，可能需要 OCR：" + ", ".join(empty))
     if damaged:
         warnings.append("以下页面含无法识别的字符，公式或表格需对照 PDF 复核：" + ", ".join(damaged))
     return warnings
+
+
+def _has_unreadable_characters(text: str) -> bool:
+    """缺字和不可显示字符都需告警；正常换行、制表符不属于缺字。"""
+    return "\ufffd" in text or any(
+        ord(character) < 32 and character not in "\t\n\r" for character in text
+    )
 
 
 class PyMuPDF4LLMParser:
@@ -43,27 +50,40 @@ class PyMuPDF4LLMParser:
 
         import pymupdf
         import pymupdf4llm
+        from pypdf import PdfReader
 
         pages = pymupdf4llm.to_markdown(
             str(source_path), page_chunks=True, write_images=False, show_progress=False, use_ocr=False,
         )
         parsed_pages: list[ParsedPdfPage] = []
+        font_reader = None
+        additional_warnings = []
         with pymupdf.open(source_path) as document:
             for index, page in enumerate(pages, start=1):
                 markdown = str(page.get("text") or "").strip()
-                # 中文说明：版面转换偶尔把公式中的求和号、上下标变成无法识别
-                # 的字符。只在确实出现这种损坏时，从同一份 PDF 的同一页再取
-                # 一份普通文字，供后续作者和审计逐字查证；原 Markdown 不删除，
-                # 页码不变，警告也继续保留。普通文字可能仍不完美，不能据此
-                # 宣称公式已验证，更不能从其他论文或模型记忆补出缺失符号。
-                if "\ufffd" in markdown and index <= len(document):
+                # 中文说明：某些数学字体没有 Unicode 映射。版面文字会出现
+                # 缺字，普通文字也可能把求和号读成字母、括号读成控制字符。
+                # 用同一 PDF 的同一页做字体解码，不从模型记忆补符号；原来的
+                # Markdown 保留，新增内容明确标为同页补充，页码不改变。
+                if index <= len(document):
                     plain = document[index - 1].get_text("text").strip()
-                    if plain and plain.count("\ufffd") < markdown.count("\ufffd"):
-                        markdown += "\n\n### 同页 PDF 纯文本补充（公式仍需核对原页）\n\n" + plain
+                    if _has_unreadable_characters(markdown) or _has_unreadable_characters(plain):
+                        try:
+                            if font_reader is None:
+                                font_reader = PdfReader(source_path)
+                            decoded = str(font_reader.pages[index - 1].extract_text() or "").strip()
+                            if decoded and not _has_unreadable_characters(decoded):
+                                markdown += "\n\n### 同页 PDF 字体解码文本补充（pypdf，公式仍需核对原页）\n\n" + decoded
+                            else:
+                                additional_warnings.append(f"第 {index} 页字体解码仍有缺字或空文本，不能据此复原公式")
+                        except Exception as exc:
+                            # 补充失败不能把已取得的版面文字也丢掉；保存明确警告，
+                            # 写作和审计仍须拒绝无法逐字核对的损坏证据。
+                            additional_warnings.append(f"第 {index} 页字体解码补充失败：{type(exc).__name__}")
                 parsed_pages.append(ParsedPdfPage(page_number=index, text=markdown,
                                                   metadata={"parser": self.name}))
         result = PdfParseResult(pages=parsed_pages)
-        result.warnings = _page_warnings(result.pages)
+        result.warnings = [*_page_warnings(result.pages), *additional_warnings]
         return result
 
 
