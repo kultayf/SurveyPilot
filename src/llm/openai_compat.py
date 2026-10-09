@@ -117,6 +117,7 @@ class OpenAICompatProvider(LLMProvider):
         content: list[str] = []
         usage: JsonObject | None = None
         finish_reason: str | None = None
+        response_model: str | None = None
         try:
             stream = await _maybe_await(
                 self.client.chat.completions.create(
@@ -126,6 +127,10 @@ class OpenAICompatProvider(LLMProvider):
             async for event in _aiter(stream):
                 # OpenAI 兼容流式事件通常把增量内容放在 choices[0].delta 中。
                 event_dict = _to_dict(event)
+                # 中文说明：流式回复可能只在部分片段给实际模型名，保留真正收到的
+                # 名称供验收日志核对，不根据网关别名猜测底层模型。
+                if isinstance(event_dict.get("model"), str) and event_dict["model"].strip():
+                    response_model = event_dict["model"]
                 if isinstance(event_dict.get("usage"), dict):
                     usage = event_dict["usage"]
                 choice = event.choices[0] if getattr(event, "choices", None) else None
@@ -143,7 +148,8 @@ class OpenAICompatProvider(LLMProvider):
                 for item in getattr(delta, "tool_calls", None) or []:
                     if callbacks.on_tool_call_delta:
                         callbacks.on_tool_call_delta(_to_dict(item))
-            return LLMResponse(content="".join(content), finish_reason=finish_reason or "stop", usage=usage)
+            return LLMResponse(content="".join(content), finish_reason=finish_reason or "stop", usage=usage,
+                               response_model=response_model)
         except Exception as exc:
             return self._error_response(exc)
 
@@ -246,7 +252,13 @@ class OpenAICompatProvider(LLMProvider):
             # 推理模型和新 OpenAI 模型使用 max_completion_tokens。
             token_key = "max_completion_tokens" if self.spec.supports_max_completion_tokens or _is_reasoning_model(self.model) else "max_tokens"
             kwargs[token_key] = settings.max_tokens
-        if settings.reasoning_effort:
+        # 中文说明：系统默认的 none 不能当作所有兼容模型都接受的参数。
+        # tierflow 的短连通测试能回答，但同一真实写作输入携带 none 返回400；
+        # 只去掉该字段后，实际 glm-5.3-flash 返回了完整工具请求。
+        # 因此默认 none 只发给这里已识别的推理模型；普通模型或网关别名省略。
+        # 用户明确选择 low/medium/high 等强度仍照原值发送，不猜测网关上游。
+        # 省略不是保证上游关闭思考，实际思考用量须按服务端回执记录。
+        if settings.reasoning_effort and (settings.reasoning_effort != "none" or _is_reasoning_model(self.model)):
             kwargs["reasoning_effort"] = settings.reasoning_effort
         if stream and self.include_stream_usage:
             # 部分 OpenAI 兼容服务支持在最后一个流式片段返回 usage；不支持时由上游报错并走统一错误处理。
@@ -361,6 +373,8 @@ class OpenAICompatProvider(LLMProvider):
             finish_reason=choice.get("finish_reason"),
             usage=response.get("usage"),
             reasoning_content=message.get("reasoning_content"),
+            # 中文说明：只记录服务端实际返回的名称，缺失时仍是未知。
+            response_model=response.get("model") if isinstance(response.get("model"), str) else None,
         )
 
 

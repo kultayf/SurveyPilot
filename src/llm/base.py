@@ -78,6 +78,7 @@ class LLMResponse:
         error_code: 供应商错误体中的业务错误码。
         error_retry_after_s: 建议等待多久再重试，单位秒。
         error_should_retry: 是否建议重试；若为空则由通用策略继续判断。
+        response_model: 服务端实际返回的模型名称；未提供时保持空值，不用配置名补填。
 
     这个对象把“成功响应”和“失败响应”都统一进同一个结构里，使得上层调用方
     不用分别处理 SDK 异常类型、HTTP 异常类型和正常返回类型。
@@ -93,6 +94,10 @@ class LLMResponse:
     error_code: str | None = None
     error_retry_after_s: float | None = None
     error_should_retry: bool | None = None
+    # 中文说明：配置可能写网关别名 tierflow，实际回复却标注 glm-5.3-flash。
+    # 分开保存这两个名字，才能核查三次验收是否由同一实际模型完成。
+    # 服务端没有给名称时记为未知，不能拿请求中的别名冒充实际模型。
+    response_model: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -545,6 +550,7 @@ class LLMProvider(ABC):
             "模型调用完成",
             extra={
                 "provider_model": self.model,
+                "response_model": getattr(response, "response_model", getattr(response, "model", None)),
                 "operation": operation,
                 "duration_ms": duration_ms,
                 "attempts": attempts,

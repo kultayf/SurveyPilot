@@ -180,20 +180,25 @@ class CitationAuditAgent(BaseAgent):
                     overlap = sum(term in claim for term in unit_terms)
                     if not overlap:
                         continue
+                    matching_chunks = []
                     for source in binding.get("chunks") or []:
                         chunk_id = str(source.get("chunkId") or "")
                         if (chunk_id in by_id and chunk_id not in bound_ids
                                 and canonical(by_id[chunk_id].paperId) == paper_id):
-                            peer_matches.append((overlap, chunk_id))
+                            matching_chunks.append(chunk_id)
+                    if matching_chunks:
+                        peer_matches.append((overlap, matching_chunks))
                 if peer_matches:
-                    # 中文说明：摘要一句可能概括正文同篇论文的两个不同操作。
-                    # 真实 GIN 摘要前半句对应多重集、后半句对应节点更新，旧代码
-                    # 只给一个正文来源，更新定义被挤掉。最多取两条不同的已绑定
-                    # 原文作为候选；总候选和输入预算不变，仍由模型独立核查。
+                    # 中文说明：第56轮摘要包含掩蔽、归一化、线性组合三个操作。
+                    # 比较句的两个来源重复占满位置，把正文掩蔽定义挤掉。
+                    # 先从不同匹配句各取一条真实来源，再补同句的其他来源；
+                    # 单论文摘要最多三条，其余最多两条，总候选和输入预算不变。
+                    ordered_matches = sorted(peer_matches, key=lambda item: -item[0])
                     matching_ids = list(dict.fromkeys(
-                        chunk_id for _, chunk_id in sorted(peer_matches, key=lambda item: -item[0])
+                        [chunk_ids[0] for _, chunk_ids in ordered_matches]
+                        + [chunk_id for _, chunk_ids in ordered_matches for chunk_id in chunk_ids[1:]]
                     ))
-                    peer_candidate_ids.extend(matching_ids[:2])
+                    peer_candidate_ids.extend(matching_ids[:3 if abstract and len(source_ids) == 1 else 2])
                 # 中文说明：阅读阶段的编号可能先列摘要、引言，再列方法章。
                 # 优先选择标题不像摘要/引言/实验的原文切片作为第二候选；
                 # 如果没有这种切片，再按原顺序给候选，不能猜测不存在的编号。
@@ -207,7 +212,11 @@ class CitationAuditAgent(BaseAgent):
                 secondary_ids.extend(hint_chunk_ids)
                 if matches:
                     secondary_ids.extend(chunk_id for chunk_id, _ in matches[1:])
-            candidate_ids = list(dict.fromkeys(per_paper_ids + peer_candidate_ids + method_candidate_ids + bound_ids + secondary_ids
+            # 中文说明：本轮 GAT 比较句已绑定掩蔽与线性组合两段真实原文，
+            # 但其他小节和阅读线索先占满四个位置，把第二段绑定挤掉了。
+            # 每篇仍先保留一个位置，再优先放本句自己的全部真实绑定；
+            # 其余线索只补空位。候选总数、论文范围和支持判定标准都不变。
+            candidate_ids = list(dict.fromkeys(per_paper_ids + bound_ids + peer_candidate_ids + method_candidate_ids + secondary_ids
                                                + [chunk_id for chunk_id, _ in ranked]))
             allowed_chunk_ids = {c.chunk_id for c in allowed}
             candidates = {chunk_id: by_id[chunk_id] for chunk_id in candidate_ids if chunk_id in allowed_chunk_ids}
@@ -362,21 +371,19 @@ class CitationAuditAgent(BaseAgent):
             # 补问只看这些完整干净引句，不再读取损坏原段后凭记忆复原公式；
             # 没有足以支持全部事实的选项仍判不足，最后的逐字与归属检查不变。
             quote_options = {}
-            for source in raw_evidence:
-                if not isinstance(source, dict):
-                    continue
-                chunk_id = str(source.get("chunkId") or "")
-                chunk = candidate_maps[index].get(chunk_id)
-                if not chunk:
-                    continue
+            # 中文说明：抄错引句时，不能只在模型选错的那一段中寻找替代。
+            # 使用这条事实首次审计已看过的原文候选，论文范围与数量不扩大。
+            # 每个选项仍须是清晰连续的原句，不把整段损坏上下文再次交给模型。
+            for chunk_id, chunk in candidate_maps[index].items():
                 source_text = chunk.content[:2400]
                 for paragraph in re.split(r"\n\s*\n", source_text):
-                    for sentence in re.split(r"(?<=[.!?。！？])\s+", paragraph):
+                    for sentence in re.split(r"(?<=[.!?。！？:：])\s+", paragraph):
                         quote = sentence.strip()
                         # 原文切片的开头/结尾可能正好截在句中；尤其结尾没有
-                        # 句号的残句不能变成补问选项，避免重新出现半句假支持。
+                        # 句尾标点的残句不能变成选项。冒号前的完整操作描述可以
+                        # 作证，但不能据此补出冒号后缺失的公式或输出值。
                         if (_quote_has_parse_risk(quote) or not 8 <= len(quote) <= 1200
-                                or not re.search(r"[.!?。！？][*_\"'’”)]*$", quote)):
+                                or not re.search(r"[.!?。！？:：][*_\"'’”)]*$", quote)):
                             continue
                         option_id = f"q{len(quote_options)}"
                         quote_options[option_id] = {"chunkId": chunk_id, "quote": quote}
@@ -386,6 +393,7 @@ class CitationAuditAgent(BaseAgent):
                               " 本次只在 supported 时返回 evidence:[{chunkId,quoteOptionId}]；"
                               "quoteOptionId 必须来自用户给出的 quote_options，需选择能共同支撑全部事实的片段；"
                               "本次只有 quote_options 中的完整引句可作证据，不能推测被排除的公式。"
+                              "冒号结尾的文字只支持其明确写出的操作，不能证明冒号后未提供的公式、符号关系或数值。"
                               "不得因为有选项就推定事实受支持，不足仍判 insufficient。"},
                               {"role": "user", "content": json.dumps(
                                   {"abstract": abstract, "units": [{**retry_unit, "sources": []}], "quote_options": quote_options,

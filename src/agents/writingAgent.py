@@ -556,6 +556,15 @@ class WritingAgent(BaseAgent):
                     "warnings": [*list(state.get("warnings") or []), f"审查模型调用失败：{raw_output}"],
                 }
             parsed = _extract_json_object(raw_output)
+            # 中文说明：第56轮两次审稿都给出明确的不通过与整改建议，却漏了
+            # 显示说明 message。不能因此丢掉真实建议，让作者没有机会修改。
+            # 只接收缺说明的有效否定；通过仍须完整格式，真假判断和建议要求不变。
+            if (isinstance(parsed, dict) and set(parsed) == {"passed", "suggestions"}
+                    and parsed.get("passed") is False
+                    and isinstance(parsed.get("suggestions"), list)
+                    and parsed["suggestions"]
+                    and all(isinstance(item, str) and item.strip() for item in parsed["suggestions"])):
+                parsed = {**parsed, "message": "审稿未通过，具体问题见修改建议。"}
             # 不能把字符串 "true" 当成通过，也不能把空整改建议当成有效否定。
             if (isinstance(parsed, dict) and set(parsed) == {"passed", "suggestions", "message"}
                     and type(parsed.get("passed")) is bool
