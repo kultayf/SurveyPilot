@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,8 @@ class AnalyseModelResult:
     # 中文说明：保留服务端的结束原因和用量，才能区分正文截断与真正的格式错误。
     finish_reason: str | None = None
     usage: JsonObject | None = None
+    # 中文说明：只在子主题格式纠错时记录两次真实回复，原失败回复不能被新回复覆盖。
+    attempts: list[JsonObject] = field(default_factory=list)
 
 
 class AnalyseAgent(BaseAgent):
@@ -66,15 +68,40 @@ class AnalyseAgent(BaseAgent):
 
         if self.context.llm is None:
             return AnalyseModelResult(reason="未配置可用分析模型")
+        messages = _subtopic_messages(topic=topic, group=group)
         try:
             response = await self.context.llm.provider.chat(
-                _subtopic_messages(topic=topic, group=group),
+                messages,
                 temperature=0.2,
             )
         except Exception as exc:
             return AnalyseModelResult(reason=f"分析模型调用失败：{exc}", request_failed=True)
         self.report_usage(response, usage_callback)
-        return _parse_response(response)
+        result = _parse_response(response)
+        result.attempts = [{"raw_model_output": result.raw_model_output, "reason": result.reason,
+                            "finish_reason": result.finish_reason, "usage": result.usage,
+                            "response_model": getattr(response, "response_model", None)}]
+        # 中文说明：本轮模型已完整回复，但字符串中未转义的双引号使 JSON 无法读取。
+        # 只允许模型自己纠正一次格式，不在程序里替换引号或补造分析；连接错误和截断
+        # 不进入这次纠错。原论文材料、模型预算和调用时限都保持不变。
+        if result.parsed is None and not result.request_failed and result.finish_reason == "stop":
+            attempts = list(result.attempts)
+            try:
+                response = await self.context.llm.provider.chat(
+                    [*messages, {"role": "assistant", "content": result.raw_model_output},
+                     {"role": "user", "content": "上一回复不是合法 JSON。只修复 JSON 格式，尤其转义字符串内部的双引号；"
+                      "保留原字段、论文编号和事实内容，不新增或补造结论。只输出完整 JSON 对象，不附解释或代码围栏。"}],
+                    temperature=0.2,
+                )
+            except Exception as exc:
+                return AnalyseModelResult(reason=f"分析格式纠错调用失败：{exc}", request_failed=True,
+                                          attempts=[*attempts, {"reason": str(exc), "usage": None}])
+            self.report_usage(response, usage_callback)
+            result = _parse_response(response)
+            result.attempts = [*attempts, {"raw_model_output": result.raw_model_output, "reason": result.reason,
+                                          "finish_reason": result.finish_reason, "usage": result.usage,
+                                          "response_model": getattr(response, "response_model", None)}]
+        return result
 
     async def async_analyse_overall(self, *, topic: str, subtopic_analyses: list[JsonObject], usage_callback: Any | None = None) -> AnalyseModelResult:
         """综合所有子主题分析，并返回解析后的 JSON。"""

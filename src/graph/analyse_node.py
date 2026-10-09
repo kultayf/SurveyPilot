@@ -240,8 +240,10 @@ async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: Analyse
                 "analysis_status": "failed", "reason": result.reason,
                 "raw_model_output": result.raw_model_output,
                 "request_failed": result.request_failed,
-                "finish_reason": result.finish_reason, "usage": result.usage}
-    return _normalize_subtopic_analysis(result.parsed, group)
+                "finish_reason": result.finish_reason, "usage": result.usage,
+                "model_attempts": list(result.attempts)}
+    # 中文说明：成功的格式纠错也保存第一次失败回复和两次用量，不能抹去失败记录。
+    return {**_normalize_subtopic_analysis(result.parsed, group), "model_attempts": list(result.attempts)}
 
 
 async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agent: AnalyseAgent, usage_callback: Any | None = None) -> JsonObject:
