@@ -24,6 +24,17 @@ def missing_requested_arxiv_ids(topic: str, papers: list[Any]) -> list[str]:
         for value in (paper.get("id"), paper.get("paperId"), paper.get("url"),
                       paper.get("pdf_url"), metadata.get("arxiv_id"), metadata.get("arxiv_versioned_id")):
             found.update(re.findall(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)", str(value or "")))
+        # 中文说明：出版社版可能把 arXiv 原文放在备用全文地址中，主编号是 DOI。
+        # 只读取来源已经返回的正规 arXiv abs/pdf 地址，不按标题猜编号，
+        # 也不把摘要或任意网站中出现的一串数字当成原论文身份。
+        fulltext_urls = metadata.get("fulltext_urls")
+        for value in fulltext_urls if isinstance(fulltext_urls, list) else []:
+            match = re.fullmatch(
+                r"https?://(?:www\.|export\.)?arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?/?",
+                str(value or ""), re.IGNORECASE,
+            )
+            if match:
+                found.add(match.group(1))
     return sorted(requested - found)
 
 
