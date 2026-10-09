@@ -1117,6 +1117,7 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     evidence = [{"field": str(item.get("field") or item.get("全局分析字段") or ""),
                  "content": _compact_text(item.get("content") or item.get("内容") or "",
                                           max_chars=4000 if item.get("field") in {
+                                              "本节来源论文身份（标题和编号，不是事实证据）",
                                               "实证矩阵的原文位置（不是事实结论）",
                                               "前置小节已定位原文的入口（不是事实结论）",
                                           } else 1800)}

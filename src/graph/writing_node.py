@@ -200,6 +200,11 @@ def run_writing_node():
             # 方法切片编号只作为“去哪里查”的入口；正文仍必须用工具打开
             # 原文，逐句绑定真实子片段，不能把提取说明当成事实证明。
             selected_paper_ids = {str(row.get("paperId") or "").casefold() for row in selected_rows}
+            # 中文说明：只给编号时，作者不知道出版社 DOI 对应哪篇论文，
+            # 本轮 ConViT 小节因此把查询限制到了 CoaT 和 Swin。
+            # 从实际阅读记录补上标题和编号的对应关系，不按标题猜编号；
+            # 这些信息只用于找到论文，正文事实仍须通过工具读取原文。
+            paper_identities: dict[str, JsonObject] = {}
             method_locations: list[JsonObject] = []
             seen_method_papers: set[str] = set()
             for result in [*read_results, *session_read_results]:
@@ -207,6 +212,9 @@ def run_writing_node():
                 paper_id = str(paper.get("paperId") or paper.get("id") or "")
                 if not paper_id or paper_id.casefold() not in selected_paper_ids or paper_id.casefold() in seen_method_papers:
                     continue
+                paper_identities.setdefault(paper_id.casefold(), {
+                    "paperId": paper_id, "title": str(paper.get("title") or ""),
+                })
                 methods = str((result.get("extraction") or {}).get("methods") or "")
                 chunk_ids = list(dict.fromkeys(
                     marker for marker in re.findall(r"\[([^\[\]\n]+)\]", methods)
@@ -220,10 +228,18 @@ def run_writing_node():
                 # 这些编号标成模型操作定义，诱导作者优先打开不相干的段落。
                 section_evidence.append({"field": "阅读笔记的方法线索（可能是理论分析或实验，并非模型操作定义）",
                                          "content": json.dumps(method_locations, ensure_ascii=False)})
+            if paper_identities:
+                section_evidence.insert(0, {
+                    "field": "本节来源论文身份（标题和编号，不是事实证据）",
+                    "content": json.dumps(list(paper_identities.values()), ensure_ascii=False),
+                })
             # 中文说明：第十三轮的大纲 task 把 GCN 的线性扩展误写成内存瓶颈，
             # 即使提醒作者“仅作线索”，实际正文仍照抄。大纲只决定章节结构、
             # 标题和字数；正文的事实范围由用户原始要求与可核实原文决定。
             task_text = ("用户原始要求（唯一内容边界）：" + str(request.topic or "")[:1600]
+                         # 中文说明：小节可能只叫“门控位置自注意力”，需要保留
+                         # 上一级“ConViT”标题，才知道本节究竟在讨论哪篇论文。
+                         + "\n当前章节标题：" + str(section_task.get("chapter_title") or section_task["chapter_key"])
                          + "\n当前小节标题：" + str(section_task.get("section_title") or section_task["section_id"]))
             task_text += "\n写作范围：只回答用户要求中与本小节标题对应的问题。大纲任务细节和前文均未通过原文核查，不得补入未要求的方法痛点、效率、硬件或研究空白。每句论文事实先查原文，证据不支持就删去；已索引原文是否缺少某数字须检查实验章节、表格与附录，未查全不得断言不存在。"
             comparison_title = str(section_task.get("section_title") or "")

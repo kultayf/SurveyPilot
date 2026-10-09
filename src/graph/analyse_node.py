@@ -48,8 +48,8 @@ def run_analyse_node():
     async def _node(state: State) -> State:
         """执行分析节点。
 
-        子主题分析失败时仍可保留保守结果，但全局综合分析是后续写作的核心依据；
-        如果它没有返回合法 JSON，节点会在重试用尽后直接失败，不生成虚假的综合报告。
+        子主题和全局综合分析都必须实际成功；失败时保存诊断并停止后续写作，
+        不用通用文字补成科研结论，也不把不完整分析当作正常报告。
         """
 
         request = state.get("request")
@@ -113,15 +113,15 @@ def run_analyse_node():
                 )
 
                 # 中文说明：协程每次从模型调用返回后，会先完整执行这段没有 await 的代码。
-                # 所以计数会按真实完成顺序递增，前端看到的是当前已经完成的子主题总数。
+                # 所以计数按请求返回顺序递增；失败卡片另行明确标为失败，不算分析成功。
                 completed_subtopic_count += 1
                 if reporter is not None:
                     reporter.progress(
-                        f"子主题分析完成：{subtopic}",
+                        f"子主题分析{'失败' if analysis.get('analysis_status') == 'failed' else '完成'}：{subtopic}",
                         stage="analyse_subtopic",
                         event_key=f"subtopic:{index}",
                         stage_title=subtopic,
-                        runtime_status="completed",
+                        runtime_status="failed" if analysis.get("analysis_status") == "failed" else "completed",
                         completed=completed_subtopic_count,
                         total=len(groups),
                         subtopic=subtopic,
@@ -133,6 +133,26 @@ def run_analyse_node():
             subtopic_analyses = await asyncio.gather(
                 *(analyse_group(index, group) for index, group in enumerate(groups, start=1))
             )
+
+            # 中文说明：本轮四个子主题超时后，旧流程补了通用文字继续写作。
+            # 先等已发出的子主题请求结束，完整保存成功和失败的真实结果；
+            # 只要还有失败，就停止在分析阶段，不再付费综合或生成不完整正文。
+            failed_subtopics = [item for item in subtopic_analyses if item.get("analysis_status") == "failed"]
+            if failed_subtopics:
+                message = f"{len(failed_subtopics)} 个子主题分析失败，已保留诊断并停止后续写作：" + "；".join(
+                    f"{item['subtopic']}：{item['reason']}" for item in failed_subtopics
+                )
+                failed_ref = await _persist_report_if_possible(state, {
+                    "analysis_version": ANALYSIS_VERSION, "topic": request.topic,
+                    "subtopic_analyses": subtopic_analyses, "overall_analysis": {},
+                    "execution_metadata": {"status": "failed", "model_used": model_used,
+                                           "created_at": utc_now(), "message": message},
+                })
+                if reporter is not None:
+                    if failed_ref:
+                        reporter.artifact(failed_ref, stage="analysis_failed_artifact_ready")
+                    reporter.failed(message, stage="analyse_subtopic")
+                raise RuntimeError(message)
 
             if reporter is not None:
                 reporter.progress("正在综合所有子主题的分析结果", stage="analyse_overall")
@@ -214,7 +234,13 @@ async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: Analyse
 
     result = await agent.async_analyse_subtopic(topic=topic, group=group, usage_callback=usage_callback)
     if result.parsed is None:
-        return _fallback_subtopic_analysis(group, reason=result.reason)
+        # 中文说明：失败不是科研分析结果。保留原回复、原因和真实用量，
+        # 未返回用量时保持未知，不补通用结论或给补写内容贴论文编号。
+        return {"subtopic": str(group.get("subtopic") or "综合分析"),
+                "analysis_status": "failed", "reason": result.reason,
+                "raw_model_output": result.raw_model_output,
+                "request_failed": result.request_failed,
+                "finish_reason": result.finish_reason, "usage": result.usage}
     return _normalize_subtopic_analysis(result.parsed, group)
 
 
