@@ -71,7 +71,12 @@ def classify_message(content: str, *, has_report: bool) -> str:
         r"(?:不想干了?|不做了?|先不做了?|算了|别做了?|不用做了?)[。！! ]*", text
     ):
         return "pause"
-    if has_report and re.search(r"重新检索|重新调研|更新文献|重新查找论文", text):
+    # 中文说明：局部修订常会附带“不要重新检索”。不能只看到这四个字就
+    # 启动整篇付费调研；明确说不要、不必、无需、不用的命令应保持不执行。
+    # 同一句另有肯定的更新命令时仍可执行，例如“不要重新检索，但更新文献”。
+    if has_report and re.search(
+        r"(?<!不要)(?<!不必)(?<!无需)(?<!不用)(?:重新检索|重新调研|更新文献|重新查找论文)", text
+    ):
         return "refresh"
     if has_report and re.search(r"重新生成|重新写|重写|再生成|纠错|改正|修正|修改|调整|缩短|扩写|删掉|删除", text):
         return "edit"
