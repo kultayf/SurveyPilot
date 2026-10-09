@@ -375,7 +375,9 @@ def run_writing_node():
                 # 明确要求的五篇是否都被写到。这里只检查覆盖，不替模型补论文
                 # 事实；缺少任一指定论文就保持待核查，并在修订时指出编号。
                 body = str(section_result.get("source_content") or section_result.get("content") or "")
-                missing_ids = [paper_id for paper_id in named_arxiv_ids if f"[{paper_id}]" not in body]
+                missing_ids = _missing_named_arxiv_ids(
+                    body, named_arxiv_ids, [*read_results, *session_read_results],
+                )
                 if missing_ids:
                     old_review = dict(section_result.get("review") or {})
                     message = "综合节未覆盖用户指定原论文：" + "、".join(missing_ids)
@@ -686,6 +688,53 @@ def _flatten_outline(outline: JsonObject) -> list[JsonObject]:
                 }
             )
     return tasks
+
+
+def _missing_named_arxiv_ids(
+    body: str, named_arxiv_ids: list[str], read_results: list[JsonObject],
+) -> list[str]:
+    """按已读全文的明确来源编号检查覆盖，不要求所有数据源使用同一种编号。"""
+
+    # 中文说明：用户点名 arXiv 编号，OpenAlex 却可能给同一篇论文的 DOI。
+    # 例如 GAT 的本地编号是 Cambridge DOI，但实际下载地址仍指向它的 arXiv PDF。
+    # 只用已成功分块的阅读记录中明确的编号或下载地址建立对应关系；不靠题名
+    # 相似、模型猜测或正文里的数字认领论文，也不修改正文和原文切片编号。
+    aliases = {arxiv_id: set() for arxiv_id in named_arxiv_ids}
+    identity_pattern = re.compile(
+        r"(?:^10\.48550/arxiv\.|^https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/)"
+        r"(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?(?:$|[?#])",
+        re.IGNORECASE,
+    )
+    for result in read_results:
+        full_text = result.get("full_text") or {}
+        if (full_text.get("status") not in {"indexed", "chunks_saved"}
+                or int(full_text.get("chunk_count") or 0) < 1):
+            continue
+        paper = result.get("paper") or {}
+        paper_id = str(paper.get("paperId") or paper.get("id") or "").strip()
+        if not paper_id:
+            continue
+        # 中文说明：只读取识别论文身份所需的字段，不扫描摘要、题名或模型结论。
+        identifiers = [paper_id, paper.get("doi"), paper.get("url"),
+                       paper.get("pdf_url"), full_text.get("source_url")]
+        identities: set[str] = set()
+        for value in identifiers:
+            identifier = str(value or "").strip()
+            match = identity_pattern.search(identifier)
+            if match:
+                identities.add(match.group(1))
+            elif re.fullmatch(r"\d{4}\.\d{4,5}", identifier):
+                identities.add(identifier)
+        # 中文说明：题录与实际全文地址若指向不同论文，不替它选择一个，也不
+        # 让同一条引用同时顶替两篇点名论文；保持缺失，留给来源检查处理。
+        if len(identities) == 1:
+            arxiv_id = next(iter(identities))
+            if arxiv_id in aliases:
+                aliases[arxiv_id].add(paper_id.casefold())
+    cited_ids = {marker.strip().casefold() for marker in re.findall(r"\[([^\[\]\r\n]+)\]", body)}
+    # 中文说明：每篇点名论文都必须有已读全文与正文引用的交集。写一个孤立的
+    # [arXiv编号]、引用未知 DOI 或漏掉论文仍会失败；语义支持继续由独立审计判断。
+    return [arxiv_id for arxiv_id in named_arxiv_ids if not (aliases[arxiv_id] & cited_ids)]
 
 
 def _previous_source_locations(sections: list[JsonObject], allowed_paper_ids: list[str]) -> list[JsonObject]:
