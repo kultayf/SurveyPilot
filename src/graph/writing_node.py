@@ -306,10 +306,12 @@ def run_writing_node():
                      # 同一个损坏公式。把被拒绝引句的真实编号告诉作者，让它
                      # 换到清晰原句；编号只是错误位置，绝不作为通过证据。
                      "unusable_quote_chunk_ids": list(dict.fromkeys(
-                         str(source.get("chunkId") or "")
-                         for source in unit.get("evidence") or []
-                         if isinstance(source, dict) and source.get("chunkId")
-                         and _quote_has_parse_risk(str(source.get("quote") or ""))
+                         list(unit.get("unusable_quote_chunk_ids") or []) + [
+                             str(source.get("chunkId") or "")
+                             for source in unit.get("evidence") or []
+                             if isinstance(source, dict) and source.get("chunkId")
+                             and _quote_has_parse_risk(str(source.get("quote") or ""))
+                         ]
                      ))}
                     for audit_section in (state.get("citation_audit") or {}).get("sections", [])
                     if audit_section.get("section_id") == section_task["section_id"]

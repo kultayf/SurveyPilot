@@ -387,12 +387,38 @@ class CitationAuditAgent(BaseAgent):
                             continue
                         option_id = f"q{len(quote_options)}"
                         quote_options[option_id] = {"chunkId": chunk_id, "quote": quote}
+            # 中文说明：PDF 在页末可能没有句号，但作者已经选中的普通文字
+            # 仍能直接说明一个操作。若唯一差异是把换行抄成空格，只从同一
+            # 切片找回它的原始字符，作为补问选项；不补字、不修公式、不跨段
+            # 拼接，也不把这次定位直接当成支持。模型还须重新核查全部事实。
+            # 含缺字的原响应在上方已被拦住；原文实际有缺字时也不能新增选项。
+            for source in raw_evidence:
+                if not isinstance(source, dict):
+                    continue
+                chunk_id = str(source.get("chunkId") or "")
+                chunk = candidate_maps[index].get(chunk_id)
+                quote = str(source.get("quote") or "").strip()
+                if not chunk or not 8 <= len(quote) <= 1200:
+                    continue
+                source_text = chunk.content[:2400]
+                if quote in source_text:
+                    continue
+                pattern = r"\s+".join(re.escape(part) for part in re.split(r"\s+", quote))
+                matches = list(re.finditer(pattern, source_text))
+                if len(matches) != 1:
+                    continue
+                original_quote = matches[0].group()
+                if (_quote_has_parse_risk(original_quote) or len(original_quote) > 1200
+                        or any(option["chunkId"] == chunk_id and option["quote"] == original_quote
+                               for option in quote_options.values())):
+                    continue
+                quote_options[f"q{len(quote_options)}"] = {"chunkId": chunk_id, "quote": original_quote}
             if not quote_options:
                 continue
             retry_messages = [{"role": "system", "content": messages[0]["content"] +
                               " 本次只在 supported 时返回 evidence:[{chunkId,quoteOptionId}]；"
                               "quoteOptionId 必须来自用户给出的 quote_options，需选择能共同支撑全部事实的片段；"
-                              "本次只有 quote_options 中的完整引句可作证据，不能推测被排除的公式。"
+                              "本次只有 quote_options 中的原文连续引句可作证据，不能推测被排除的公式或未提供的后文。"
                               "冒号结尾的文字只支持其明确写出的操作，不能证明冒号后未提供的公式、符号关系或数值。"
                               "不得因为有选项就推定事实受支持，不足仍判 insufficient。"},
                               {"role": "user", "content": json.dumps(
@@ -435,6 +461,17 @@ class CitationAuditAgent(BaseAgent):
             verified_quotes = []
             verified_raw_count = 0
             raw_evidence = verdict.get("evidence")
+            # 中文说明：引句既有缺字又抄错格式时，它不会进入“已定位引句”。
+            # 过去因此丢失错误位置，重写模型又选回同一损坏公式。只记录当前
+            # 候选中确实存在、且原文自身也含解析问题的编号，供作者避开；这些
+            # 编号不是证据，不补造引句，也不能让任何事实自动通过。
+            unusable_chunk_ids = list(dict.fromkeys(
+                str(source.get("chunkId") or "")
+                for source in raw_evidence if isinstance(source, dict)
+                and str(source.get("chunkId") or "") in candidate_maps[index]
+                and _quote_has_parse_risk(str(source.get("quote") or ""))
+                and _quote_has_parse_risk(candidate_maps[index][str(source["chunkId"])].content[:2400])
+            )) if isinstance(raw_evidence, list) else []
             for source in raw_evidence if isinstance(raw_evidence, list) else []:
                 if not isinstance(source, dict):
                     continue
@@ -478,10 +515,15 @@ class CitationAuditAgent(BaseAgent):
                 status = "insufficient"
                 # 模型的口头判断不能覆盖原句检查；向用户解释最终没有通过的真实原因。
                 reason = "模型判断支持，但返回的引句未全部在原文中精确定位，或未覆盖正文的全部引用。模型说明：" + reason
+            if status == "supported" and unusable_chunk_ids:
+                status = "insufficient"
+            if unusable_chunk_ids:
+                reason = "返回引句及对应原文含解析缺字或表格；须换用清晰原文，不能重建损坏公式。" + reason
             # 带引用的段落不能靠声明“非事实文字”绕过核查。
             if status == "not_required" and cited_sets[index]:
                 status = "insufficient"
                 reason = "正文带有引用，不能作为无需核查的结构说明跳过。模型说明：" + reason
-            results[index].update(status=status, reason=reason, evidence=verified_quotes)
+            results[index].update(status=status, reason=reason, evidence=verified_quotes,
+                                  unusable_quote_chunk_ids=unusable_chunk_ids)
         report["status"] = "passed" if all(item["status"] in {"supported", "not_required"} for item in results) else "needs_review"
         return report
