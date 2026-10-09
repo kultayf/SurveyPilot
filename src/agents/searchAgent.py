@@ -209,16 +209,23 @@ class SearchAgent(BaseAgent):
     def _build_llm_messages(self, state: JsonObject) -> list[JsonObject]:
         """构造给大模型的消息。
 
-        这里刻意不出现任何具体搜索引擎名称，也不要求模型理解后端检索细节，
-        只让它专注把主题拆成几个适合检索的研究方向，并给每个方向生成关键词表达式。
+        不要求模型理解网站接口，只说明本次是否能按 arXiv 编号直接取论文。
+        这样不支持编号查询的来源会使用标题，不会把编号误当成普通文本检索。
         """
 
         request = state["request"]
-        # 中文说明：系统规则统一放在 Prompts.py，当前函数只负责填充用户主题。
+        constraints = dict(getattr(request, "constraints", {}) or {})
+        sources = self._normalize_string_list(constraints.get("sources"))
+        # 中文说明：只有单独选择 arXiv 才使用现有的编号批量查询。
+        # 默认来源和混合来源仍用标题关键词，原始主题中的编号继续用于身份核对；
+        # 这里不替模型编写关键词，也不改变缺少指定原论文时停止写作的规则。
+        exact_arxiv_lookup = [source.lower() for source in sources] == ["arxiv"]
+        # 中文说明：系统规则统一放在 Prompts.py，这里填充主题与本次检索能力。
         system_prompt = SEARCH_AGENT_SYSTEM_PROMPT
         user_prompt = json.dumps(
             {
                 "topic": getattr(request, "topic", ""),
+                "exact_arxiv_lookup": exact_arxiv_lookup,
                 "task": "请根据 topic 拆分研究方向，并为每个方向生成英文检索关键词表达式。",
             },
             ensure_ascii=False,
