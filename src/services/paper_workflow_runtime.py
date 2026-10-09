@@ -71,11 +71,17 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
 
         workflow_checkpoint = explicit_workflow if isinstance(explicit_workflow, dict) else None
         if kind in {"resume", "repair"} and workflow_checkpoint is None and not isinstance(read_checkpoint, dict):
-            # 中文说明：先使用阅读节点保存的更细断点，再使用通用阶段断点。
-            # 这样阅读到一半失败时无需重新处理已经完成的论文。
-            read_checkpoint = _latest_legacy_read_checkpoint(record)
+            # 中文说明：旧阅读失败卡会一直保留。任务后来已完成阅读、推进到分析时，
+            # 不能让旧卡里的断点覆盖新检查点，否则会重读已完成的论文和矩阵。
+            # 只有最新阶段仍是阅读，或还没有阶段检查点，才使用更细的阅读断点。
+            workflow_checkpoint = latest_workflow_checkpoint(repo, record)
+            read_checkpoint = (_latest_legacy_read_checkpoint(record)
+                               if workflow_checkpoint is None or workflow_checkpoint.get("next_node") == "run_read"
+                               else None)
+            if read_checkpoint is not None:
+                # 中文说明：确实仍在阅读时，让下面沿用细断点里的已完成论文，不能又选回较粗的阶段断点。
+                workflow_checkpoint = None
             if read_checkpoint is None:
-                workflow_checkpoint = latest_workflow_checkpoint(repo, record)
                 if workflow_checkpoint is None:
                     targets = (missing_or_unverified_sections(report or {}, audit) if kind == "repair"
                                else missing_body_sections(report or {}))
